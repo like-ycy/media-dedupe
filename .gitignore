@@ -75,3 +75,5 @@ deploy/
 .superpowers/
 .omo
 tools/
+.media-dedupe/
+reports/
