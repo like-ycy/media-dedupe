@@ -5,9 +5,9 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from media_dedupe.cache import Cache
-from media_dedupe.models import RecommendationAction, ImageMetadata, VideoMetadata
-from media_dedupe.pipeline import scan_paths
+from src.cache import Cache
+from src.models import RecommendationAction, ImageMetadata, VideoMetadata
+from src.pipeline import scan_paths
 
 
 def test_scan_paths_finds_exact_duplicate_images(tmp_path: Path) -> None:
@@ -66,10 +66,8 @@ def test_scan_paths_finds_similar_videos(
     ) -> list[str]:
         return ["ffff", "ff0f", "f0ff"]
 
-    monkeypatch.setattr("media_dedupe.pipeline.ffprobe_metadata", fake_metadata)
-    monkeypatch.setattr(
-        "media_dedupe.pipeline.compute_video_frame_hashes", fake_video_hashes
-    )
+    monkeypatch.setattr("src.pipeline.ffprobe_metadata", fake_metadata)
+    monkeypatch.setattr("src.pipeline.compute_video_frame_hashes", fake_video_hashes)
 
     groups = scan_paths(
         [tmp_path], cache_path=cache_path, similarity_threshold=0.80, recursive=True
@@ -123,9 +121,9 @@ def test_scan_paths_reuses_cached_facts_for_unchanged_files(
     def fail_phash(path: Path) -> str:
         raise AssertionError(f"phash recomputed for {path}")
 
-    monkeypatch.setattr("media_dedupe.pipeline.file_sha256", fail_file_hash)
-    monkeypatch.setattr("media_dedupe.pipeline.read_image_metadata", fail_metadata)
-    monkeypatch.setattr("media_dedupe.pipeline.compute_image_phash", fail_phash)
+    monkeypatch.setattr("src.pipeline.file_sha256", fail_file_hash)
+    monkeypatch.setattr("src.pipeline.read_image_metadata", fail_metadata)
+    monkeypatch.setattr("src.pipeline.compute_image_phash", fail_phash)
 
     groups = scan_paths(
         [tmp_path], cache_path=cache_path, similarity_threshold=0.80, recursive=True
@@ -185,7 +183,7 @@ def test_scan_paths_uses_workers_for_image_fingerprints(
         def map(self, function, values):
             return [function(value) for value in values]
 
-    monkeypatch.setattr("media_dedupe.pipeline.ThreadPoolExecutor", FakeExecutor)
+    monkeypatch.setattr("src.pipeline.ThreadPoolExecutor", FakeExecutor)
 
     scan_paths(
         [tmp_path],
@@ -215,10 +213,8 @@ def test_scan_paths_reuses_cached_video_facts(
     ) -> list[str]:
         return ["ffff", "ff0f", "f0ff"]
 
-    monkeypatch.setattr("media_dedupe.pipeline.ffprobe_metadata", fake_metadata)
-    monkeypatch.setattr(
-        "media_dedupe.pipeline.compute_video_frame_hashes", fake_video_hashes
-    )
+    monkeypatch.setattr("src.pipeline.ffprobe_metadata", fake_metadata)
+    monkeypatch.setattr("src.pipeline.compute_video_frame_hashes", fake_video_hashes)
     scan_paths(
         [tmp_path], cache_path=cache_path, similarity_threshold=0.80, recursive=True
     )
@@ -229,8 +225,8 @@ def test_scan_paths_reuses_cached_video_facts(
     def fail_hashes(path: Path, *, metadata: VideoMetadata | None = None) -> list[str]:
         raise AssertionError(f"frame hashes recomputed for {path}")
 
-    monkeypatch.setattr("media_dedupe.pipeline.ffprobe_metadata", fail_metadata)
-    monkeypatch.setattr("media_dedupe.pipeline.compute_video_frame_hashes", fail_hashes)
+    monkeypatch.setattr("src.pipeline.ffprobe_metadata", fail_metadata)
+    monkeypatch.setattr("src.pipeline.compute_video_frame_hashes", fail_hashes)
 
     groups = scan_paths(
         [tmp_path], cache_path=cache_path, similarity_threshold=0.80, recursive=True
@@ -251,13 +247,11 @@ def test_scan_paths_recommends_highest_quality_similar_image(
         second: ImageMetadata(4000, 3000, "PNG", None, True),
     }
 
-    monkeypatch.setattr("media_dedupe.pipeline.file_sha256", lambda path: path.name)
+    monkeypatch.setattr("src.pipeline.file_sha256", lambda path: path.name)
     monkeypatch.setattr(
-        "media_dedupe.pipeline.read_image_metadata", lambda path: metadata_by_path[path]
+        "src.pipeline.read_image_metadata", lambda path: metadata_by_path[path]
     )
-    monkeypatch.setattr(
-        "media_dedupe.pipeline.compute_image_phash", lambda path: "ffff"
-    )
+    monkeypatch.setattr("src.pipeline.compute_image_phash", lambda path: "ffff")
 
     groups = scan_paths(
         [tmp_path],
@@ -294,13 +288,9 @@ def test_scan_paths_uses_connected_components_for_similar_images(
         third: "00000000000000ff",
     }
 
-    monkeypatch.setattr("media_dedupe.pipeline.file_sha256", lambda path: path.name)
-    monkeypatch.setattr(
-        "media_dedupe.pipeline.read_image_metadata", lambda path: metadata
-    )
-    monkeypatch.setattr(
-        "media_dedupe.pipeline.compute_image_phash", lambda path: hashes[path]
-    )
+    monkeypatch.setattr("src.pipeline.file_sha256", lambda path: path.name)
+    monkeypatch.setattr("src.pipeline.read_image_metadata", lambda path: metadata)
+    monkeypatch.setattr("src.pipeline.compute_image_phash", lambda path: hashes[path])
 
     groups = scan_paths(
         [tmp_path], cache_path=cache_path, similarity_threshold=0.90, recursive=True

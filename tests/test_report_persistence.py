@@ -4,8 +4,8 @@ from pathlib import Path
 
 from PIL import Image
 
-from media_dedupe.cache import Cache
-from media_dedupe.pipeline import load_last_report_groups, scan_paths
+from src.cache import Cache
+from src.pipeline import load_last_report_groups, scan_paths
 
 
 def test_scan_persists_groups_for_report_command(tmp_path: Path) -> None:

@@ -18,15 +18,15 @@ dev = [
 ]
 
 [project.scripts]
-media-dedupe = "media_dedupe.cli:main"
+media-dedupe = "src.cli:main"
 
 [build-system]
 requires = ["setuptools>=75.0"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools.packages.find]
-where = ["src"]
-
 [[tool.uv.index]]
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 default = true
+
+[tool.setuptools]
+packages = ["src"]

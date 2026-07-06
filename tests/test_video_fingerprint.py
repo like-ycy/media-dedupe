@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from media_dedupe.video_fingerprint import (
+from src.video_fingerprint import (
     build_frame_timestamps,
     compute_video_frame_hashes,
     extract_frame_to_image,
     ffprobe_metadata,
 )
-from media_dedupe.models import VideoMetadata
+from src.models import VideoMetadata
 
 
 def test_build_frame_timestamps_skips_edges() -> None:
@@ -110,9 +110,7 @@ def test_compute_video_frame_hashes_stops_after_frame_failure_limit(
         calls.append(timestamp_ms)
         return None
 
-    monkeypatch.setattr(
-        "media_dedupe.video_fingerprint.extract_frame_to_image", fake_extract
-    )
+    monkeypatch.setattr("src.video_fingerprint.extract_frame_to_image", fake_extract)
 
     hashes = compute_video_frame_hashes(
         tmp_path / "clip.mp4",

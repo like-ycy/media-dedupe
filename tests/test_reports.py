@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import json
 
-from media_dedupe.models import (
+from src.models import (
     GroupType,
     RecommendationAction,
     ReportError,
     ReportGroup,
     ReportItem,
 )
-from media_dedupe.reports import (
+from src.reports import (
     render_html_report,
     render_json_report,
     render_text_report,

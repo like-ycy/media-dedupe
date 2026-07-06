@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from media_dedupe.matching import connected_components, is_video_metadata_candidate
-from media_dedupe.models import GroupType, SimilarityEdge, VideoMetadata
+from src.matching import connected_components, is_video_metadata_candidate
+from src.models import GroupType, SimilarityEdge, VideoMetadata
 
 
 def test_connected_components_groups_transitive_edges() -> None:

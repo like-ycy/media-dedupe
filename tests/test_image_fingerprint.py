@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from media_dedupe.image_fingerprint import compute_image_phash, read_image_metadata
+from src.image_fingerprint import compute_image_phash, read_image_metadata
 
 
 def test_read_image_metadata_returns_size_and_format(tmp_path: Path) -> None:
@@ -35,7 +35,7 @@ def test_read_image_metadata_rejects_images_over_pixel_limit(
 ) -> None:
     image_path = tmp_path / "large.png"
     Image.new("RGB", (4, 4), color="blue").save(image_path)
-    monkeypatch.setattr("media_dedupe.image_fingerprint.MAX_IMAGE_PIXELS", 10)
+    monkeypatch.setattr("src.image_fingerprint.MAX_IMAGE_PIXELS", 10)
 
     metadata = read_image_metadata(image_path)
 

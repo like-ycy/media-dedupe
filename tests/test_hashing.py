@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from media_dedupe.hashing import file_sha256, hamming_distance, hash_similarity
+from src.hashing import file_sha256, hamming_distance, hash_similarity
 
 
 def test_file_sha256_matches_identical_files(tmp_path: Path) -> None:

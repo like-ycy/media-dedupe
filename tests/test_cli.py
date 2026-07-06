@@ -5,9 +5,9 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from media_dedupe import cli
-from media_dedupe.cli import build_parser, run
-from media_dedupe.models import ReportGroup, VideoMetadata
+from src import cli
+from src.cli import build_parser, run
+from src.models import ReportGroup, VideoMetadata
 
 
 def test_parser_accepts_scan_command() -> None:
@@ -207,13 +207,13 @@ def test_run_scan_respects_no_video_flag(
     second.write_bytes(b"video-b")
 
     monkeypatch.setattr(
-        "media_dedupe.pipeline.ffprobe_metadata",
+        "src.pipeline.ffprobe_metadata",
         lambda path: VideoMetadata(
             10_000, 1920, 1080, 30.0, 4_000_000, "h264", True, True
         ),
     )
     monkeypatch.setattr(
-        "media_dedupe.pipeline.compute_video_frame_hashes",
+        "src.pipeline.compute_video_frame_hashes",
         lambda path, *, metadata=None: ["ffff", "ff0f", "f0ff"],
     )
 

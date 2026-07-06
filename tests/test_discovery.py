@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from media_dedupe.discovery import discover_media_files
-from media_dedupe.models import MediaType
+from src.discovery import discover_media_files
+from src.models import MediaType
 
 
 def test_discover_media_files_finds_supported_media(tmp_path: Path) -> None:
@@ -41,7 +41,9 @@ def test_discover_media_files_skips_hidden_and_venv_directories(tmp_path: Path) 
     assert [item.path for item in discovered] == [visible]
 
 
-def test_discover_media_files_does_not_follow_directory_symlinks(tmp_path: Path) -> None:
+def test_discover_media_files_does_not_follow_directory_symlinks(
+    tmp_path: Path,
+) -> None:
     outside = tmp_path / "outside"
     root = tmp_path / "root"
     outside.mkdir()

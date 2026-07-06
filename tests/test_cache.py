@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from media_dedupe.cache import Cache
-from media_dedupe.models import DiscoveredFile, ImageMetadata, MediaType, VideoMetadata
+from src.cache import Cache
+from src.models import DiscoveredFile, ImageMetadata, MediaType, VideoMetadata
 
 
 def make_file(path: Path, size: int = 12) -> DiscoveredFile:

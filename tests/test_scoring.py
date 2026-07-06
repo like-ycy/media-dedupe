@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from media_dedupe.models import ImageMetadata, RecommendationAction, VideoMetadata
-from media_dedupe.scoring import (
+from src.models import ImageMetadata, RecommendationAction, VideoMetadata
+from src.scoring import (
     choose_recommended_item,
     score_image_quality,
     score_video_quality,
