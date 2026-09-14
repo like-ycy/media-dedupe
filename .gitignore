@@ -25,6 +25,9 @@ latest.txt
 # Stress / scratch fixtures (regenerate via tmp_stress/generate_stress.py)
 tmp_stress/
 
+# Local sample media (not required for build/test)
+testdata/
+
 # OS
 .DS_Store
 Thumbs.db
