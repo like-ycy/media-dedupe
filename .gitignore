@@ -1,0 +1,39 @@
+# Build output
+bin/
+/media-dedupe
+/media-dedupe.exe
+*.exe
+*.test
+*.out
+coverage.out
+coverage.html
+profile.cov
+
+# Local SQLite cache (WAL sidecars too)
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+
+# Generated reports / thumbs (if written under the repo)
+reports/
+thumbs/
+latest.html
+latest.json
+latest.txt
+
+# Stress / scratch fixtures (regenerate via tmp_stress/generate_stress.py)
+tmp_stress/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors / IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# Go workspace / vendor noise
+vendor/
