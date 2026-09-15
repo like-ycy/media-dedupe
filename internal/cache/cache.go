@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -138,6 +139,33 @@ CREATE INDEX IF NOT EXISTS idx_files_size ON files(size_bytes);
 	// Best-effort migrations for caches created before these columns existed.
 	_, _ = c.db.Exec(`ALTER TABLE duplicate_items ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0`)
 	_, _ = c.db.Exec(`ALTER TABLE duplicate_items ADD COLUMN thumb_path TEXT`)
+	_, _ = c.db.Exec(`ALTER TABLE duplicate_groups ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'`)
+	_, _ = c.db.Exec(`ALTER TABLE duplicate_groups ADD COLUMN stable_key TEXT`)
+	_, _ = c.db.Exec(`ALTER TABLE duplicate_groups ADD COLUMN ignored_at TEXT`)
+	_, _ = c.db.Exec(`ALTER TABLE duplicate_groups ADD COLUMN processed_at TEXT`)
+	_, _ = c.db.Exec(`
+CREATE TABLE IF NOT EXISTS delete_ops (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    mode TEXT NOT NULL,
+    group_id INTEGER,
+    file_id INTEGER,
+    path TEXT NOT NULL,
+    ok INTEGER NOT NULL,
+    message TEXT
+)`)
+	_, _ = c.db.Exec(`
+CREATE TABLE IF NOT EXISTS recent_dirs (
+    path TEXT PRIMARY KEY,
+    last_used_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`)
+	_, _ = c.db.Exec(`
+CREATE TABLE IF NOT EXISTS frame_previews (
+    file_id INTEGER NOT NULL,
+    frame_index INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    PRIMARY KEY (file_id, frame_index)
+)`)
 	return nil
 }
 
@@ -395,6 +423,21 @@ ORDER BY frame_index, id
 }
 
 func (c *Cache) ReplaceReportGroups(groups []model.ReportGroup, scanRunID int64) error {
+	// Preserve prior statuses by stable_key so ignore/processed survive rescan.
+	prev := map[string]struct {
+		status, ignoredAt, processedAt string
+	}{}
+	if rows, err := c.db.Query(`SELECT stable_key, COALESCE(status,'pending'), COALESCE(ignored_at,''), COALESCE(processed_at,'') FROM duplicate_groups WHERE stable_key IS NOT NULL AND stable_key != ''`); err == nil {
+		for rows.Next() {
+			var key, status, ignoredAt, processedAt string
+			if err := rows.Scan(&key, &status, &ignoredAt, &processedAt); err != nil {
+				break
+			}
+			prev[key] = struct{ status, ignoredAt, processedAt string }{status, ignoredAt, processedAt}
+		}
+		rows.Close()
+	}
+
 	tx, err := c.db.Begin()
 	if err != nil {
 		return err
@@ -407,10 +450,26 @@ func (c *Cache) ReplaceReportGroups(groups []model.ReportGroup, scanRunID int64)
 		return err
 	}
 	for _, g := range groups {
+		status := string(model.GroupPending)
+		ignoredAt := sql.NullString{}
+		processedAt := sql.NullString{}
+		if g.Status != "" {
+			status = string(g.Status)
+		} else if g.StableKey != "" {
+			if p, ok := prev[g.StableKey]; ok {
+				status = p.status
+				if p.ignoredAt != "" {
+					ignoredAt = sql.NullString{String: p.ignoredAt, Valid: true}
+				}
+				if p.processedAt != "" {
+					processedAt = sql.NullString{String: p.processedAt, Valid: true}
+				}
+			}
+		}
 		res, err := tx.Exec(`
-INSERT INTO duplicate_groups (id, scan_run_id, group_type, confidence, recommended_file_id)
-VALUES (?, ?, ?, ?, ?)
-`, g.GroupID, scanRunID, string(g.GroupType), g.Confidence, g.RecommendedFileID)
+INSERT INTO duplicate_groups (id, scan_run_id, group_type, confidence, recommended_file_id, status, stable_key, ignored_at, processed_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, g.GroupID, scanRunID, string(g.GroupType), g.Confidence, g.RecommendedFileID, status, g.StableKey, ignoredAt, processedAt)
 		if err != nil {
 			return err
 		}
@@ -431,9 +490,125 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	return tx.Commit()
 }
 
+func (c *Cache) SetGroupStatus(groupID int64, status model.GroupStatus) error {
+	now := timeNow()
+	switch status {
+	case model.GroupIgnored:
+		_, err := c.db.Exec(`UPDATE duplicate_groups SET status = ?, ignored_at = ?, processed_at = NULL WHERE id = ?`, string(status), now, groupID)
+		return err
+	case model.GroupProcessed:
+		_, err := c.db.Exec(`UPDATE duplicate_groups SET status = ?, processed_at = ?, ignored_at = NULL WHERE id = ?`, string(status), now, groupID)
+		return err
+	default:
+		_, err := c.db.Exec(`UPDATE duplicate_groups SET status = ?, ignored_at = NULL, processed_at = NULL WHERE id = ?`, string(status), groupID)
+		return err
+	}
+}
+
+func (c *Cache) UpdateRecommended(groupID, fileID int64) error {
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`UPDATE duplicate_groups SET recommended_file_id = ? WHERE id = ?`, fileID, groupID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE duplicate_items SET action = ? WHERE group_id = ?`, string(model.ActionKeep), groupID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE duplicate_items SET action = ? WHERE group_id = ? AND file_id != ?`, string(model.ActionCleanup), groupID, fileID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (c *Cache) RecordDeleteOps(mode string, groupID int64, items []struct {
+	FileID  int64
+	Path    string
+	OK      bool
+	Message string
+}) error {
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, it := range items {
+		ok := 0
+		if it.OK {
+			ok = 1
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO delete_ops (mode, group_id, file_id, path, ok, message) VALUES (?, ?, ?, ?, ?, ?)`,
+			mode, groupID, it.FileID, it.Path, ok, it.Message,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (c *Cache) SaveFramePreview(fileID int64, frameIndex int, path string) error {
+	_, err := c.db.Exec(`
+INSERT INTO frame_previews (file_id, frame_index, path) VALUES (?, ?, ?)
+ON CONFLICT(file_id, frame_index) DO UPDATE SET path = excluded.path
+`, fileID, frameIndex, path)
+	return err
+}
+
+func (c *Cache) LoadFramePreviews(fileID int64) ([]string, error) {
+	rows, err := c.db.Query(`SELECT path FROM frame_previews WHERE file_id = ? ORDER BY frame_index`, fileID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (c *Cache) AddRecentDir(path string) error {
+	_, err := c.db.Exec(`
+INSERT INTO recent_dirs (path, last_used_at) VALUES (?, ?)
+ON CONFLICT(path) DO UPDATE SET last_used_at = excluded.last_used_at
+`, path, timeNow())
+	return err
+}
+
+func (c *Cache) ListRecentDirs(limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := c.db.Query(`SELECT path FROM recent_dirs ORDER BY last_used_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func timeNow() string {
+	return time.Now().UTC().Format(time.RFC3339)
+}
+
 func (c *Cache) LoadReportGroups() ([]model.ReportGroup, error) {
 	rows, err := c.db.Query(`
-SELECT id, group_type, confidence, recommended_file_id
+SELECT id, group_type, confidence, recommended_file_id, COALESCE(stable_key, '')
 FROM duplicate_groups ORDER BY id
 `)
 	if err != nil {
@@ -453,14 +628,32 @@ FROM duplicate_groups ORDER BY id
 			id, recID int64
 			gtype     string
 			conf      float64
+			stableKey sql.NullString
 		)
-		if err := rows.Scan(&id, &gtype, &conf, &recID); err != nil {
+		if err := rows.Scan(&id, &gtype, &conf, &recID, &stableKey); err != nil {
 			return nil, err
 		}
+		_ = stableKey
 		keys = append(keys, gkey{id, recID, gtype, conf})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+
+	// Load statuses separately (query above may predate status columns in rare partial migrations).
+	statusBy := map[int64]struct {
+		status, ignoredAt, processedAt string
+	}{}
+	if srows, err := c.db.Query(`SELECT id, COALESCE(status,'pending'), COALESCE(ignored_at,''), COALESCE(processed_at,'') FROM duplicate_groups`); err == nil {
+		for srows.Next() {
+			var id int64
+			var status, ignoredAt, processedAt string
+			if err := srows.Scan(&id, &status, &ignoredAt, &processedAt); err != nil {
+				break
+			}
+			statusBy[id] = struct{ status, ignoredAt, processedAt string }{status, ignoredAt, processedAt}
+		}
+		srows.Close()
 	}
 
 	for _, k := range keys {
@@ -507,12 +700,19 @@ ORDER BY duplicate_items.file_id
 			})
 		}
 		itemRows.Close()
+		st := statusBy[k.id]
+		if st.status == "" {
+			st.status = string(model.GroupPending)
+		}
 		groups = append(groups, model.ReportGroup{
 			GroupID:           k.id,
 			GroupType:         model.GroupType(k.gtype),
 			Confidence:        k.conf,
 			RecommendedFileID: k.recID,
 			Items:             items,
+			Status:            model.GroupStatus(st.status),
+			IgnoredAt:         st.ignoredAt,
+			ProcessedAt:       st.processedAt,
 		})
 	}
 	return groups, nil

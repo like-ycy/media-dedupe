@@ -1,13 +1,18 @@
 # Build output
 bin/
+build/
 /media-dedupe
 /media-dedupe.exe
+/media-dedupe-app
 *.exe
 *.test
 *.out
 coverage.out
 coverage.html
 profile.cov
+
+# Wails generated bindings
+frontend/wailsjs/
 
 # Local SQLite cache (WAL sidecars too)
 *.sqlite
