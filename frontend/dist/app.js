@@ -14,9 +14,9 @@ const state = {
 };
 
 // Wails bindings with browser fallback for preview.
-const hasWails = typeof window.go !== 'undefined' && window.go.appapi;
+const hasWails = typeof window.go !== 'undefined' && window.go.appapi?.App;
 const mock = createMock();
-const api = hasWails ? window.go.appapi : mock;
+const api = hasWails ? window.go.appapi.App : mock;
 
 function createMock() {
   const projects = [];

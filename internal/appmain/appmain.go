@@ -49,7 +49,7 @@ func Run() {
 	})
 
 	err = wails.Run(&options.App{
-		Title:     "媒体去重工具 (本机离线运行)",
+		Title:     "媒体去重工具",
 		Width:     1280,
 		Height:    860,
 		MinWidth:  980,
