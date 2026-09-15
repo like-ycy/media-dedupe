@@ -78,9 +78,56 @@ jobs:
           path: out/*
           if-no-files-found: error
 
+  build-app-windows:
+    name: Build Wails app windows/amd64
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate release tag
+        shell: bash
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "Release tag must match vMAJOR.MINOR.PATCH"
+            exit 1
+          }
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install Wails CLI
+        shell: bash
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      - name: Build desktop app
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          wails build -platform windows/amd64 -o media-dedupe-app.exe
+          mkdir -p out
+          if [ -f "build/bin/media-dedupe-app.exe" ]; then
+            BIN="build/bin/media-dedupe-app.exe"
+          else
+            BIN="media-dedupe-app.exe"
+          fi
+          ls -la build/bin "$BIN" || true
+          zip "out/media-dedupe-app_${VERSION}_windows_amd64.zip" "$BIN"
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: media-dedupe-app-windows-amd64
+          path: out/*
+          if-no-files-found: error
+
   release:
     name: Publish release
-    needs: build
+    needs: [build, build-app-windows]
     runs-on: ubuntu-24.04
     steps:
       - name: Download artifacts
