@@ -30,6 +30,14 @@ const (
 	ActionReview  Action = "review_required"
 )
 
+type GroupStatus string
+
+const (
+	GroupPending   GroupStatus = "pending"
+	GroupIgnored   GroupStatus = "ignored"
+	GroupProcessed GroupStatus = "processed"
+)
+
 type DiscoveredFile struct {
 	Path      string
 	MediaType MediaType
@@ -84,6 +92,10 @@ type ReportGroup struct {
 	Confidence        float64
 	RecommendedFileID int64
 	Items             []ReportItem
+	Status            GroupStatus
+	StableKey         string
+	IgnoredAt         string
+	ProcessedAt       string
 }
 
 type ReportError struct {

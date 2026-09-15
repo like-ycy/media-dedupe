@@ -1,9 +1,14 @@
 package pipeline
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +22,7 @@ import (
 	imgutil "media-dedupe/internal/imagehash"
 	"media-dedupe/internal/match"
 	"media-dedupe/internal/model"
+	"media-dedupe/internal/progress"
 	"media-dedupe/internal/score"
 	"media-dedupe/internal/video"
 )
@@ -25,6 +31,7 @@ type Options struct {
 	Paths         []string
 	CachePath     string
 	ThumbDir      string
+	FrameDir      string
 	Threshold     float64
 	Recursive     bool
 	IncludeImages bool
@@ -34,6 +41,9 @@ type Options struct {
 	FrameCount    int
 	EnableThumbs  bool
 	OnProgress    func(msg string)
+	Ctx           context.Context
+	OnEvent       func(ev progress.Event)
+	ProjectID     string
 }
 
 type Result struct {
@@ -41,6 +51,7 @@ type Result struct {
 	Errors   []model.ReportError
 	Meta     model.ScanMeta
 	ThumbDir string
+	Canceled bool
 }
 
 type fileCacheInfo struct {
@@ -66,7 +77,13 @@ type videoFacts struct {
 	quality float64
 }
 
-// Scan runs the full detection pipeline.
+func (o *Options) context() context.Context {
+	if o.Ctx != nil {
+		return o.Ctx
+	}
+	return context.Background()
+}
+
 func Scan(opts Options) (*Result, error) {
 	if opts.Workers < 1 {
 		opts.Workers = config.DefaultWorkers
@@ -80,6 +97,7 @@ func Scan(opts Options) (*Result, error) {
 	if opts.Threshold <= 0 {
 		opts.Threshold = config.DefaultSimilarityThreshold
 	}
+	ctx := opts.context()
 
 	startWall := time.Now()
 	startStamp := startWall.UTC().Format("2006-01-02 15:04:05")
@@ -105,19 +123,37 @@ func Scan(opts Options) (*Result, error) {
 
 	var errsMu sync.Mutex
 	var reportErrs []model.ReportError
+	exactCount := 0
+	similarCount := 0
 	recordErr := func(path, stage, message string) {
 		errsMu.Lock()
 		reportErrs = append(reportErrs, model.ReportError{Path: path, Stage: stage, Message: message})
+		n := len(reportErrs)
 		errsMu.Unlock()
 		_ = c.RecordError(scanRunID, path, stage, message)
+		opts.emit(progress.Event{
+			Stage:    progress.StageError,
+			Phase:    "error",
+			Message:  message,
+			Errors:   n,
+			CurrentFile: path,
+		})
 	}
-	progress := func(msg string) {
+	progressFn := func(msg string) {
 		if opts.OnProgress != nil {
 			opts.OnProgress(msg)
 		}
 	}
+	emit := opts.emit
 
-	progress("discovering files...")
+	if err := ctx.Err(); err != nil {
+		_ = c.FinishScanRun(scanRunID, 0, 0)
+		emit(progress.Event{Stage: progress.StageCanceled, Phase: "canceled", Message: "已取消，缓存已保留", ProjectID: opts.ProjectID})
+		return &Result{Canceled: true, Meta: model.ScanMeta{Paths: opts.Paths, StartedAt: startStamp, CachePath: opts.CachePath}}, nil
+	}
+
+	emit(progress.Event{Stage: progress.StageDiscover, Phase: "running", Message: "发现文件...", ProjectID: opts.ProjectID})
+	progressFn("discovering files...")
 	discovered := discovery.Discover(opts.Paths, opts.Recursive, recordErr)
 	var files []model.DiscoveredFile
 	for _, d := range discovered {
@@ -129,12 +165,21 @@ func Scan(opts Options) (*Result, error) {
 		}
 		files = append(files, d)
 	}
-	progress(fmt.Sprintf("discovered %d media files", len(files)))
+	if err := ctx.Err(); err != nil {
+		_ = c.FinishScanRun(scanRunID, len(files), 0)
+		emit(progress.Event{Stage: progress.StageCanceled, Phase: "canceled", Message: "已取消，缓存已保留", FilesSeen: len(files), ProjectID: opts.ProjectID})
+		return &Result{Canceled: true, Meta: model.ScanMeta{Paths: opts.Paths, StartedAt: startStamp, FilesSeen: len(files), CachePath: opts.CachePath}}, nil
+	}
+	emit(progress.Event{Stage: progress.StageDiscover, Phase: "done", Message: fmt.Sprintf("发现 %d 个媒体文件", len(files)), Current: len(files), Total: len(files), Percent: 10, FilesSeen: len(files), ProjectID: opts.ProjectID})
+	progressFn(fmt.Sprintf("discovered %d media files", len(files)))
 
 	infos := make([]fileCacheInfo, len(files))
 	for i, d := range files {
-		// Must check before Upsert: Upsert overwrites size/mtime, which would
-		// make every existing file look unchanged and reuse stale hashes.
+		if err := ctx.Err(); err != nil {
+			_ = c.FinishScanRun(scanRunID, len(files), 0)
+			emit(progress.Event{Stage: progress.StageCanceled, Phase: "canceled", Message: "已取消，缓存已保留", FilesSeen: len(files), ProjectID: opts.ProjectID})
+			return &Result{Canceled: true, Meta: model.ScanMeta{Paths: opts.Paths, StartedAt: startStamp, FilesSeen: len(files), CachePath: opts.CachePath}}, nil
+		}
 		unchanged := c.IsUnchanged(d)
 		id, err := c.UpsertFile(d)
 		if err != nil {
@@ -146,45 +191,81 @@ func Scan(opts Options) (*Result, error) {
 	}
 	_ = c.MarkMissingLastSeenBefore(startStamp)
 
-	progress("exact duplicate pass...")
-	exactGroups, usedPaths := exactPass(c, files, infos, recordErr, opts.Workers)
+	emit(progress.Event{Stage: progress.StageExact, Phase: "running", Message: "SHA-256 精确哈希...", Percent: 15, FilesSeen: len(files), ProjectID: opts.ProjectID})
+	progressFn("exact duplicate pass...")
+	exactGroups, usedPaths := exactPass(ctx, c, files, infos, recordErr, opts.Workers, &exactCount, emit)
+	if err := ctx.Err(); err != nil {
+		_ = c.FinishScanRun(scanRunID, len(files), len(reportErrs))
+		emit(progress.Event{Stage: progress.StageCanceled, Phase: "canceled", Message: "已取消，缓存已保留", FilesSeen: len(files), FoundExact: exactCount, ProjectID: opts.ProjectID})
+		return &Result{Canceled: true, Errors: reportErrs, Meta: model.ScanMeta{Paths: opts.Paths, StartedAt: startStamp, FilesSeen: len(files), CachePath: opts.CachePath}}, nil
+	}
+	emit(progress.Event{Stage: progress.StageExact, Phase: "done", Message: fmt.Sprintf("精确重复 %d 组", exactCount), Percent: 35, FilesSeen: len(files), FoundExact: exactCount, ProjectID: opts.ProjectID})
 
 	var similarImageGroups []model.ReportGroup
 	var imageFactsList []imageFacts
 	if opts.IncludeImages {
-		progress("image similarity pass...")
-		imageFactsList = collectImages(c, files, infos, usedPaths, recordErr, opts)
-		similarImageGroups = imageSimilarity(imageFactsList, opts)
+		if err := ctx.Err(); err == nil {
+			emit(progress.Event{Stage: progress.StageImage, Phase: "running", Message: "图片 pHash 感知哈希...", Percent: 40, FilesSeen: len(files), FoundExact: exactCount, ProjectID: opts.ProjectID})
+			progressFn("image similarity pass...")
+			imageFactsList = collectImages(ctx, c, files, infos, usedPaths, recordErr, opts)
+			similarImageGroups = imageSimilarity(imageFactsList, opts)
+			similarCount += len(similarImageGroups)
+			emit(progress.Event{Stage: progress.StageImage, Phase: "done", Message: fmt.Sprintf("近似图片 %d 组", len(similarImageGroups)), Percent: 60, FilesSeen: len(files), FoundExact: exactCount, FoundSimilar: similarCount, ProjectID: opts.ProjectID})
+		}
 	}
 
 	var similarVideoGroups []model.ReportGroup
 	if opts.IncludeVideos {
-		progress("video similarity pass...")
-		videoFactsList := collectVideos(c, files, infos, usedPaths, recordErr, opts)
-		similarVideoGroups = videoSimilarity(videoFactsList, opts)
+		ffmpeg, _ := video.Available()
+		if !ffmpeg {
+			emit(progress.Event{Stage: progress.StageVideo, Phase: "skipped", Message: "未检测到 FFmpeg，跳过视频抽帧", Percent: 65, FilesSeen: len(files), FoundExact: exactCount, FoundSimilar: similarCount, ProjectID: opts.ProjectID})
+		} else if err := ctx.Err(); err == nil {
+			emit(progress.Event{Stage: progress.StageVideo, Phase: "running", Message: "视频 FFmpeg 抽帧多帧 pHash...", Percent: 65, FilesSeen: len(files), FoundExact: exactCount, FoundSimilar: similarCount, ProjectID: opts.ProjectID})
+			progressFn("video similarity pass...")
+			videoFactsList := collectVideos(ctx, c, files, infos, usedPaths, recordErr, opts)
+			similarVideoGroups = videoSimilarity(videoFactsList, opts)
+			similarCount += len(similarVideoGroups)
+			emit(progress.Event{Stage: progress.StageVideo, Phase: "done", Message: fmt.Sprintf("近似视频 %d 组", len(similarVideoGroups)), Percent: 80, FilesSeen: len(files), FoundExact: exactCount, FoundSimilar: similarCount, ProjectID: opts.ProjectID})
+		}
 	}
+
+	if err := ctx.Err(); err != nil {
+		_ = c.FinishScanRun(scanRunID, len(files), len(reportErrs))
+		emit(progress.Event{Stage: progress.StageCanceled, Phase: "canceled", Message: "已取消，缓存已保留", FilesSeen: len(files), FoundExact: exactCount, FoundSimilar: similarCount, ProjectID: opts.ProjectID})
+		return &Result{Canceled: true, Errors: reportErrs, Meta: model.ScanMeta{Paths: opts.Paths, StartedAt: startStamp, FilesSeen: len(files), CachePath: opts.CachePath}}, nil
+	}
+
+	emit(progress.Event{Stage: progress.StageMatch, Phase: "done", Message: "分组匹配完成", Percent: 85, FilesSeen: len(files), FoundExact: exactCount, FoundSimilar: similarCount, ProjectID: opts.ProjectID})
 
 	groups := make([]model.ReportGroup, 0, len(exactGroups)+len(similarImageGroups)+len(similarVideoGroups))
 	nextID := int64(1)
 	for _, g := range exactGroups {
 		g.GroupID = nextID
+		g.StableKey = groupStableKey(g)
 		nextID++
 		groups = append(groups, g)
 	}
 	for _, g := range similarImageGroups {
 		g.GroupID = nextID
+		g.StableKey = groupStableKey(g)
 		nextID++
 		groups = append(groups, g)
 	}
 	for _, g := range similarVideoGroups {
 		g.GroupID = nextID
+		g.StableKey = groupStableKey(g)
 		nextID++
 		groups = append(groups, g)
 	}
 
 	if opts.EnableThumbs && opts.ThumbDir != "" {
-		progress("generating thumbnails...")
+		emit(progress.Event{Stage: progress.StageThumb, Phase: "running", Message: "生成缩略图...", Percent: 90, FilesSeen: len(files), FoundExact: exactCount, FoundSimilar: similarCount, ProjectID: opts.ProjectID})
+		progressFn("generating thumbnails...")
 		attachThumbs(groups, files, infos, opts)
+	}
+
+	if opts.FrameDir != "" {
+		saveFramePreviews(c, opts.FrameDir)
 	}
 
 	if err := c.ReplaceReportGroups(groups, scanRunID); err != nil {
@@ -197,6 +278,9 @@ func Scan(opts Options) (*Result, error) {
 	if err := c.FinishScanRun(scanRunID, len(files), failed); err != nil {
 		return nil, err
 	}
+
+	emit(progress.Event{Stage: progress.StageDone, Phase: "done", Message: "扫描完成", Percent: 100, FilesSeen: len(files), FoundExact: exactCount, FoundSimilar: similarCount, Errors: failed, ProjectID: opts.ProjectID})
+	progressFn("done")
 
 	return &Result{
 		Groups: groups,
@@ -214,12 +298,42 @@ func Scan(opts Options) (*Result, error) {
 	}, nil
 }
 
+func (o Options) emit(ev progress.Event) {
+	if o.OnEvent == nil {
+		return
+	}
+	if ev.ProjectID == "" {
+		ev.ProjectID = o.ProjectID
+	}
+	o.OnEvent(ev)
+}
+
+func groupStableKey(g model.ReportGroup) string {
+	paths := make([]string, 0, len(g.Items))
+	for _, it := range g.Items {
+		paths = append(paths, it.Path)
+	}
+	sort.Strings(paths)
+	h := sha256.New()
+	fmt.Fprintf(h, "%s|", g.GroupType)
+	for i, p := range paths {
+		if i > 0 {
+			h.Write([]byte{'|'})
+		}
+		h.Write([]byte(strings.ToLower(p)))
+	}
+	return hex.EncodeToString(h.Sum(nil))[:32]
+}
+
 func exactPass(
+	ctx context.Context,
 	c *cache.Cache,
 	files []model.DiscoveredFile,
 	infos []fileCacheInfo,
 	recordErr func(path, stage, message string),
 	workers int,
+	exactCount *int,
+	emit func(progress.Event),
 ) ([]model.ReportGroup, map[string]struct{}) {
 	used := map[string]struct{}{}
 	sizeBuckets := map[int64][]int{}
@@ -232,6 +346,9 @@ func exactPass(
 
 	var groups []model.ReportGroup
 	for _, idxs := range sizeBuckets {
+		if err := ctx.Err(); err != nil {
+			break
+		}
 		if len(idxs) < 2 {
 			continue
 		}
@@ -241,6 +358,9 @@ func exactPass(
 		for j, idx := range idxs {
 			j, idx := j, idx
 			g.Go(func() error {
+				if ctx.Err() != nil {
+					return nil
+				}
 				f := files[idx]
 				fileID := infos[idx].fileID
 				if infos[idx].unchanged {
@@ -273,16 +393,12 @@ func exactPass(
 				continue
 			}
 			quality := map[int64]float64{}
-			sizeByID := map[int64]int64{}
-			pathByID := map[int64]string{}
 			for _, idx := range members {
 				f := files[idx]
 				fileID := infos[idx].fileID
 				used[f.Path] = struct{}{}
 				q := qualityFor(c, f, fileID, infos[idx].unchanged, recordErr)
 				quality[fileID] = q
-				sizeByID[fileID] = f.SizeBytes
-				pathByID[fileID] = f.Path
 			}
 			actions := score.ChooseActions(quality, -1.0)
 			winner := score.Winner(quality)
@@ -296,7 +412,7 @@ func exactPass(
 					Similarity:   1.0,
 					QualityScore: quality[fileID],
 					SizeBytes:    files[idx].SizeBytes,
-					Reasons:      []string{"identical file hash"},
+					Reasons:      []string{"identical SHA-256 file hash"},
 				})
 			}
 			groups = append(groups, model.ReportGroup{
@@ -305,6 +421,7 @@ func exactPass(
 				RecommendedFileID: winner,
 				Items:             items,
 			})
+			*exactCount++
 		}
 	}
 	return groups, used
@@ -366,6 +483,7 @@ func loadVideoMeta(
 }
 
 func collectImages(
+	ctx context.Context,
 	c *cache.Cache,
 	files []model.DiscoveredFile,
 	infos []fileCacheInfo,
@@ -393,6 +511,9 @@ func collectImages(
 	for j, idx := range targets {
 		j, idx := j, idx
 		g.Go(func() error {
+			if ctx.Err() != nil {
+				return nil
+			}
 			f := files[idx]
 			fileID := infos[idx].fileID
 			unchanged := infos[idx].unchanged
@@ -472,10 +593,11 @@ func imageSimilarity(facts []imageFacts, opts Options) []model.ReportGroup {
 		})
 		edgeSim[match.EdgeKey(a, b)] = sim
 	}
-	return groupsFromComponents(factsToPathQuality(facts), edges, edgeSim, model.GroupSimilarImage, "visual image hash match")
+	return groupsFromComponents(factsToPathQuality(facts), edges, edgeSim, model.GroupSimilarImage, "visual image hash match (pHash)")
 }
 
 func collectVideos(
+	ctx context.Context,
 	c *cache.Cache,
 	files []model.DiscoveredFile,
 	infos []fileCacheInfo,
@@ -508,6 +630,9 @@ func collectVideos(
 	for j, idx := range targets {
 		j, idx := j, idx
 		g.Go(func() error {
+			if ctx.Err() != nil {
+				return nil
+			}
 			f := files[idx]
 			fileID := infos[idx].fileID
 			unchanged := infos[idx].unchanged
@@ -537,6 +662,9 @@ func collectVideos(
 				hashes = hs
 				_ = c.SavePerceptualHashes(fileID, "video_frame_phash", hashes)
 			}
+			if opts.FrameDir != "" {
+				exportFramePreviews(f.Path, meta, fileID, opts.FrameDir, opts.FrameCount)
+			}
 			fact := &videoFacts{
 				fileID:  fileID,
 				path:    f.Path,
@@ -560,6 +688,45 @@ func collectVideos(
 		}
 	}
 	return facts
+}
+
+func exportFramePreviews(path string, meta model.VideoMetadata, fileID int64, frameDir string, frameCount int) {
+	_ = os.MkdirAll(frameDir, 0o755)
+	timestamps := video.BuildFrameTimestamps(meta.DurationMs, frameCount)
+	for i, ts := range timestamps {
+		out := filepath.Join(frameDir, fmt.Sprintf("%d_%d.jpg", fileID, i))
+		if _, err := os.Stat(out); err == nil {
+			continue
+		}
+		if err := video.ExtractFrame(path, ts, out); err != nil {
+			continue
+		}
+	}
+}
+
+func saveFramePreviews(c *cache.Cache, frameDir string) {
+	entries, err := os.ReadDir(frameDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".jpg") {
+			continue
+		}
+		base := strings.TrimSuffix(e.Name(), ".jpg")
+		parts := strings.SplitN(base, "_", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		var fileID, idx int
+		if _, err := fmt.Sscanf(parts[0], "%d", &fileID); err != nil {
+			continue
+		}
+		if _, err := fmt.Sscanf(parts[1], "%d", &idx); err != nil {
+			continue
+		}
+		_ = c.SaveFramePreview(int64(fileID), idx, filepath.Join(frameDir, e.Name()))
+	}
 }
 
 func videoSimilarity(facts []videoFacts, opts Options) []model.ReportGroup {
@@ -601,7 +768,7 @@ func videoSimilarity(facts []videoFacts, opts Options) []model.ReportGroup {
 	for i, f := range facts {
 		items[i] = pathQuality{fileID: f.fileID, path: f.path, size: f.size, quality: f.quality}
 	}
-	return groupsFromComponents(items, edges, edgeSim, model.GroupSimilarVideo, "video frame hash match")
+	return groupsFromComponents(items, edges, edgeSim, model.GroupSimilarVideo, "video frame hash match (FFmpeg multi-frame pHash)")
 }
 
 type pathQuality struct {
