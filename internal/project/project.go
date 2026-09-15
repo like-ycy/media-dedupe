@@ -17,12 +17,12 @@ import (
 )
 
 type LastSummary struct {
-	FilesSeen         int   `json:"filesSeen"`
-	Groups            int   `json:"groups"`
-	ReclaimableBytes  int64 `json:"reclaimableBytes"`
-	ExactGroups       int   `json:"exactGroups"`
-	SimilarGroups     int   `json:"similarGroups"`
-	PendingGroups     int   `json:"pendingGroups"`
+	FilesSeen        int   `json:"filesSeen"`
+	Groups           int   `json:"groups"`
+	ReclaimableBytes int64 `json:"reclaimableBytes"`
+	ExactGroups      int   `json:"exactGroups"`
+	SimilarGroups    int   `json:"similarGroups"`
+	PendingGroups    int   `json:"pendingGroups"`
 }
 
 type Project struct {
@@ -35,6 +35,9 @@ type Project struct {
 	Threshold     float64     `json:"threshold"`
 	IncludeImages bool        `json:"includeImages"`
 	IncludeVideos bool        `json:"includeVideos"`
+	IncludeTexts  bool        `json:"includeTexts"`
+	TextThreshold float64     `json:"textThreshold"`
+	TextWorkers   int         `json:"textWorkers"`
 	FrameCount    int         `json:"frameCount"`
 	Workers       int         `json:"workers"`
 	VideoWorkers  int         `json:"videoWorkers"`
@@ -44,15 +47,18 @@ type Project struct {
 }
 
 type Settings struct {
-	DefaultThreshold      float64 `json:"defaultThreshold"`
-	DefaultIncludeVideos  bool    `json:"defaultIncludeVideos"`
-	DefaultFrameCount     int     `json:"defaultFrameCount"`
-	DefaultWorkers        int     `json:"defaultWorkers"`
-	DefaultVideoWorkers   int     `json:"defaultVideoWorkers"`
-	DefaultDeleteMode     string  `json:"defaultDeleteMode"`
-	AllowPermanentDelete  bool    `json:"allowPermanentDelete"`
-	FFmpegPath            string  `json:"ffmpegPath"`
-	FFprobePath           string  `json:"ffprobePath"`
+	DefaultThreshold     float64 `json:"defaultThreshold"`
+	DefaultIncludeVideos bool    `json:"defaultIncludeVideos"`
+	DefaultIncludeTexts  bool    `json:"defaultIncludeTexts"`
+	DefaultTextThreshold float64 `json:"defaultTextThreshold"`
+	DefaultTextWorkers   int     `json:"defaultTextWorkers"`
+	DefaultFrameCount    int     `json:"defaultFrameCount"`
+	DefaultWorkers       int     `json:"defaultWorkers"`
+	DefaultVideoWorkers  int     `json:"defaultVideoWorkers"`
+	DefaultDeleteMode    string  `json:"defaultDeleteMode"`
+	AllowPermanentDelete bool    `json:"allowPermanentDelete"`
+	FFmpegPath           string  `json:"ffmpegPath"`
+	FFprobePath          string  `json:"ffprobePath"`
 }
 
 type CreateInput struct {
@@ -62,6 +68,9 @@ type CreateInput struct {
 	Threshold     float64  `json:"threshold"`
 	IncludeImages bool     `json:"includeImages"`
 	IncludeVideos bool     `json:"includeVideos"`
+	IncludeTexts  bool     `json:"includeTexts"`
+	TextThreshold float64  `json:"textThreshold"`
+	TextWorkers   int      `json:"textWorkers"`
 	FrameCount    int      `json:"frameCount"`
 	Workers       int      `json:"workers"`
 	VideoWorkers  int      `json:"videoWorkers"`
@@ -75,6 +84,9 @@ type UpdateInput struct {
 	Threshold     *float64  `json:"threshold"`
 	IncludeImages *bool     `json:"includeImages"`
 	IncludeVideos *bool     `json:"includeVideos"`
+	IncludeTexts  *bool     `json:"includeTexts"`
+	TextThreshold *float64  `json:"textThreshold"`
+	TextWorkers   *int      `json:"textWorkers"`
 	FrameCount    *int      `json:"frameCount"`
 	Workers       *int      `json:"workers"`
 	VideoWorkers  *int      `json:"videoWorkers"`
@@ -91,6 +103,9 @@ func DefaultSettings() Settings {
 	return Settings{
 		DefaultThreshold:     0.8,
 		DefaultIncludeVideos: true,
+		DefaultIncludeTexts:  true,
+		DefaultTextThreshold: 0.92,
+		DefaultTextWorkers:   8,
 		DefaultFrameCount:    8,
 		DefaultWorkers:       2,
 		DefaultVideoWorkers:  1,
@@ -228,6 +243,9 @@ func (s *Store) Create(in CreateInput) (Project, error) {
 		Threshold:     in.Threshold,
 		IncludeImages: in.IncludeImages,
 		IncludeVideos: in.IncludeVideos,
+		IncludeTexts:  in.IncludeTexts,
+		TextThreshold: in.TextThreshold,
+		TextWorkers:   in.TextWorkers,
 		FrameCount:    in.FrameCount,
 		Workers:       in.Workers,
 		VideoWorkers:  in.VideoWorkers,
@@ -247,6 +265,12 @@ func (s *Store) Create(in CreateInput) (Project, error) {
 	}
 	if p.VideoWorkers < 1 {
 		p.VideoWorkers = 1
+	}
+	if p.TextThreshold <= 0 {
+		p.TextThreshold = 0.92
+	}
+	if p.TextWorkers < 1 {
+		p.TextWorkers = 8
 	}
 	for _, path := range p.Paths {
 		_ = os.MkdirAll(s.ProjectDir(p.ID), 0o755)
@@ -297,6 +321,15 @@ func (s *Store) Update(id string, in UpdateInput) (Project, error) {
 	}
 	if in.IncludeVideos != nil {
 		p.IncludeVideos = *in.IncludeVideos
+	}
+	if in.IncludeTexts != nil {
+		p.IncludeTexts = *in.IncludeTexts
+	}
+	if in.TextThreshold != nil && *in.TextThreshold > 0 {
+		p.TextThreshold = *in.TextThreshold
+	}
+	if in.TextWorkers != nil && *in.TextWorkers > 0 {
+		p.TextWorkers = *in.TextWorkers
 	}
 	if in.FrameCount != nil && *in.FrameCount > 0 {
 		p.FrameCount = *in.FrameCount
@@ -376,6 +409,12 @@ func (s *Store) SaveSettings(st Settings) error {
 	}
 	if st.DefaultVideoWorkers < 1 {
 		st.DefaultVideoWorkers = 1
+	}
+	if st.DefaultTextThreshold <= 0 {
+		st.DefaultTextThreshold = 0.92
+	}
+	if st.DefaultTextWorkers < 1 {
+		st.DefaultTextWorkers = 8
 	}
 	if st.DefaultDeleteMode == "" {
 		st.DefaultDeleteMode = "recycle"

@@ -5,6 +5,7 @@ type MediaType string
 const (
 	MediaImage MediaType = "image"
 	MediaVideo MediaType = "video"
+	MediaText  MediaType = "text"
 )
 
 type FileStatus string
@@ -20,6 +21,7 @@ const (
 	GroupExact        GroupType = "exact"
 	GroupSimilarImage GroupType = "similar_image"
 	GroupSimilarVideo GroupType = "similar_video"
+	GroupSimilarText  GroupType = "similar_text"
 )
 
 type Action string

@@ -147,6 +147,7 @@ h1 { font-size:22px; margin:0 0 8px; }
 .badge.exact { background:#1a73e8; }
 .badge.similar_image { background:#a142f4; }
 .badge.similar_video { background:#ff6d00; }
+.badge.similar_text { background:#00a67d; }
 .row { display:flex; gap:12px; flex-wrap:wrap; }
 .item { flex:1 1 220px; min-width:200px; border:1px solid var(--line); border-radius:10px; overflow:hidden; background:#12151b; }
 .item img { width:100%; aspect-ratio:4/3; object-fit:cover; display:block; background:#000; }

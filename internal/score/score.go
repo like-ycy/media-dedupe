@@ -50,6 +50,14 @@ func VideoQuality(meta model.VideoMetadata) float64 {
 	return math.Min(1.0, total)
 }
 
+// TextQuality prefers a larger readable text file when exact copies tie.
+func TextQuality(sizeBytes int64) float64 {
+	if sizeBytes <= 0 {
+		return 0
+	}
+	return math.Min(1, 0.5+math.Log1p(float64(sizeBytes))/math.Log1p(30_000_000)*0.5)
+}
+
 // ChooseActions assigns keep/cleanup/review by quality scores keyed by file ID.
 func ChooseActions(quality map[int64]float64, reviewDelta float64) map[int64]model.Action {
 	if reviewDelta == 0 {

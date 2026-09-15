@@ -2,7 +2,7 @@
 
 本机离线媒体去重工具：**CLI** + **Wails 桌面 App**。
 
-扫描目录中的图片/视频，找出精确重复（SHA-256）与视觉近似重复（pHash / FFmpeg 抽帧多帧 pHash），生成可人工审阅的结果。**不会自动删除任何文件**；App 中删除默认移入系统回收站。
+扫描目录中的图片/视频/TXT，找出精确重复（SHA-256）、视觉近似重复（pHash / FFmpeg 抽帧多帧 pHash）与正文近似重复，生成可人工审阅的结果。**不会自动删除任何文件**；App 中删除默认移入系统回收站。
 
 ## 构建
 
@@ -45,6 +45,7 @@ wails build -platform windows/amd64 -o media-dedupe-app.exe
 ./bin/media-dedupe doctor
 ./bin/media-dedupe scan ~/Pictures ~/Movies
 ./bin/media-dedupe scan ./testdata/sample --format text --no-video
+./bin/media-dedupe scan ./novels --format text --no-image --no-video --text-similarity 0.92 --text-workers 8
 ./bin/media-dedupe report --format html
 ./bin/media-dedupe cache info
 ```
@@ -57,6 +58,9 @@ wails build -platform windows/amd64 -o media-dedupe-app.exe
 | `--frames` | 8 | 视频抽帧数 |
 | `--format` | html | `text` \| `json` \| `html` |
 | `--no-thumbs` | false | 跳过缩略图 |
+| `--no-text` | false | 跳过 TXT 文件 |
+| `--text-similarity` | 0.92 | TXT 正文相似阈值 |
+| `--text-workers` | 8 | TXT 读取/指纹并发数 |
 
 ## 桌面 App 使用
 
@@ -90,7 +94,8 @@ wails build -platform windows/amd64 -o media-dedupe-app.exe
 - **精确重复**：同大小 → SHA-256 全量哈希一致
 - **图片近似**：宽高分桶 + pHash 汉明距离 / 相似度阈值
 - **视频近似**：时长/宽高预筛 + FFmpeg 多帧 pHash（默认 8 帧）
-- **增量扫描**：`size+mtime` 未变则复用缓存 hash/pHash
+- **TXT 近似**：正文规范化 + 固定数量指纹候选 + Dice 相似度；支持 UTF-8、UTF-8 BOM、GB18030、UTF-16 BOM
+- **增量扫描**：`size+mtime` 未变则复用缓存 hash/pHash/TXT 指纹
 - **组状态**：pending / ignored / processed；基于成员路径集合 `stable_key` 在重扫后保留忽略状态
 - **推荐保留**：分辨率/大小/时长/编码等启发式质量分，非完整 EXIF 调色评估
 - **HEIC/HEIF**：仅精确去重，不做 pHash

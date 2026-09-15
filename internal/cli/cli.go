@@ -20,24 +20,27 @@ import (
 
 func NewRootCmd() *cobra.Command {
 	var (
-		cachePath    string
-		similarity   float64
-		workers      int
-		videoWorkers int
-		frames       int
-		output       string
-		format       string
-		noImage      bool
-		noVideo      bool
-		recursive    bool
-		noThumbs     bool
-		thumbDir     string
+		cachePath      string
+		similarity     float64
+		workers        int
+		videoWorkers   int
+		textWorkers    int
+		frames         int
+		textSimilarity float64
+		output         string
+		format         string
+		noImage        bool
+		noVideo        bool
+		noText         bool
+		recursive      bool
+		noThumbs       bool
+		thumbDir       string
 	)
 
 	root := &cobra.Command{
 		Use:   "media-dedupe",
-		Short: "Find exact and near-duplicate images/videos locally",
-		Long: "Local CLI that scans directories for exact and near-duplicate media.\n" +
+		Short: "Find exact and near-duplicate images/videos/TXT locally",
+		Long: "Local CLI that scans directories for exact and near-duplicate media and text.\n" +
 			"It never deletes files; it only writes cache and reports.",
 	}
 
@@ -51,8 +54,9 @@ func NewRootCmd() *cobra.Command {
 			}
 			includeImage := !noImage
 			includeVideo := !noVideo
-			if noImage && noVideo {
-				return fmt.Errorf("cannot disable both --no-image and --no-video")
+			includeText := !noText
+			if noImage && noVideo && noText {
+				return fmt.Errorf("cannot disable all media types")
 			}
 
 			cachePath = fsutil.ExpandPath(cachePath)
@@ -79,6 +83,9 @@ func NewRootCmd() *cobra.Command {
 				Recursive:     recursive,
 				IncludeImages: includeImage,
 				IncludeVideos: includeVideo,
+				IncludeTexts:  includeText,
+				TextThreshold: textSimilarity,
+				TextWorkers:   textWorkers,
 				Workers:       workers,
 				VideoWorkers:  videoWorkers,
 				FrameCount:    frames,
@@ -127,11 +134,14 @@ func NewRootCmd() *cobra.Command {
 	scan.Flags().Float64Var(&similarity, "similarity", config.DefaultSimilarityThreshold, "similarity threshold 0..1")
 	scan.Flags().IntVar(&workers, "workers", config.DefaultWorkers, "image/hash workers (HDD-friendly default)")
 	scan.Flags().IntVar(&videoWorkers, "video-workers", config.DefaultVideoWorkers, "video frame extraction workers")
+	scan.Flags().IntVar(&textWorkers, "text-workers", config.DefaultTextWorkers, "text workers")
 	scan.Flags().IntVar(&frames, "frames", config.DefaultFrameCount, "video frames to sample")
+	scan.Flags().Float64Var(&textSimilarity, "text-similarity", config.DefaultTextSimilarityThreshold, "text similarity threshold 0..1")
 	scan.Flags().StringVar(&output, "output", "", "output file or directory")
 	scan.Flags().StringVar(&format, "format", "html", "output format: text|json|html")
 	scan.Flags().BoolVar(&noImage, "no-image", false, "skip images")
 	scan.Flags().BoolVar(&noVideo, "no-video", false, "skip videos")
+	scan.Flags().BoolVar(&noText, "no-text", false, "skip txt files")
 	scan.Flags().BoolVar(&recursive, "recursive", true, "recurse into subdirectories")
 	scan.Flags().BoolVar(&noThumbs, "no-thumbs", false, "skip thumbnail generation")
 	scan.Flags().StringVar(&thumbDir, "thumb-dir", "", "thumbnail directory (default cache dir/thumbs)")
@@ -213,7 +223,7 @@ func NewRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			for _, k := range []string{"files", "file_hashes", "media_metadata", "perceptual_hashes", "duplicate_groups", "duplicate_items", "scan_runs", "errors"} {
+			for _, k := range []string{"files", "file_hashes", "media_metadata", "perceptual_hashes", "text_facts", "duplicate_groups", "duplicate_items", "scan_runs", "errors"} {
 				fmt.Printf("%s: %d\n", k, info[k])
 			}
 			return nil

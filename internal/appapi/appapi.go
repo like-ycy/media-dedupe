@@ -62,6 +62,9 @@ type ProjectDTO struct {
 	Threshold     float64             `json:"threshold"`
 	IncludeImages bool                `json:"includeImages"`
 	IncludeVideos bool                `json:"includeVideos"`
+	IncludeTexts  bool                `json:"includeTexts"`
+	TextThreshold float64             `json:"textThreshold"`
+	TextWorkers   int                 `json:"textWorkers"`
 	FrameCount    int                 `json:"frameCount"`
 	Workers       int                 `json:"workers"`
 	VideoWorkers  int                 `json:"videoWorkers"`
@@ -126,19 +129,22 @@ type ItemDTO struct {
 }
 
 type GroupDetailDTO struct {
-	GroupID          int64     `json:"groupId"`
-	GroupType        string    `json:"groupType"`
-	TypeLabel        string    `json:"typeLabel"`
-	Confidence       float64   `json:"confidence"`
-	RecommendedFileID int64    `json:"recommendedFileId"`
-	Status           string    `json:"status"`
-	Items            []ItemDTO `json:"items"`
-	ReclaimableBytes int64     `json:"reclaimableBytes"`
+	GroupID           int64     `json:"groupId"`
+	GroupType         string    `json:"groupType"`
+	TypeLabel         string    `json:"typeLabel"`
+	Confidence        float64   `json:"confidence"`
+	RecommendedFileID int64     `json:"recommendedFileId"`
+	Status            string    `json:"status"`
+	Items             []ItemDTO `json:"items"`
+	ReclaimableBytes  int64     `json:"reclaimableBytes"`
 }
 
 type SettingsDTO struct {
 	DefaultThreshold     float64 `json:"defaultThreshold"`
 	DefaultIncludeVideos bool    `json:"defaultIncludeVideos"`
+	DefaultIncludeTexts  bool    `json:"defaultIncludeTexts"`
+	DefaultTextThreshold float64 `json:"defaultTextThreshold"`
+	DefaultTextWorkers   int     `json:"defaultTextWorkers"`
 	DefaultFrameCount    int     `json:"defaultFrameCount"`
 	DefaultWorkers       int     `json:"defaultWorkers"`
 	DefaultVideoWorkers  int     `json:"defaultVideoWorkers"`
@@ -237,7 +243,7 @@ func (a *App) AppReady() AppInfo {
 		FFprobe:    ffprobe,
 		AppData:    root,
 		DeleteMode: mode,
-		Engine:     "SQLite size+mtime + SHA-256 + pHash + FFmpeg",
+		Engine:     "SQLite size+mtime + SHA-256 + pHash + TXT 指纹 + FFmpeg",
 		Platform:   runtime.GOOS,
 	}
 }
@@ -257,14 +263,15 @@ func (a *App) toProjectDTO(p project.Project) ProjectDTO {
 		Threshold:     p.Threshold,
 		IncludeImages: p.IncludeImages,
 		IncludeVideos: p.IncludeVideos,
-		FrameCount:    p.FrameCount,
-		Workers:       p.Workers,
-		VideoWorkers:  p.VideoWorkers,
-		EnableThumbs:  p.EnableThumbs,
-		LastScanAt:    p.LastScanAt,
-		LastSummary:   p.LastSummary,
-		Scanning:      scanning,
-		FFmpegReady:   ffmpeg,
+		IncludeTexts:  p.IncludeTexts, TextThreshold: p.TextThreshold, TextWorkers: p.TextWorkers,
+		FrameCount:   p.FrameCount,
+		Workers:      p.Workers,
+		VideoWorkers: p.VideoWorkers,
+		EnableThumbs: p.EnableThumbs,
+		LastScanAt:   p.LastScanAt,
+		LastSummary:  p.LastSummary,
+		Scanning:     scanning,
+		FFmpegReady:  ffmpeg,
 	}
 }
 
@@ -301,6 +308,12 @@ func (a *App) CreateProject(input project.CreateInput) (ProjectDTO, error) {
 	}
 	if input.VideoWorkers <= 0 {
 		input.VideoWorkers = st.DefaultVideoWorkers
+	}
+	if input.TextThreshold <= 0 {
+		input.TextThreshold = st.DefaultTextThreshold
+	}
+	if input.TextWorkers <= 0 {
+		input.TextWorkers = st.DefaultTextWorkers
 	}
 	// EnableThumbs defaults true when omitted zero-value is false;
 	// callers should set true explicitly; for create we honor input.
@@ -399,6 +412,9 @@ func (a *App) GetSettings() (SettingsDTO, error) {
 	return SettingsDTO{
 		DefaultThreshold:     st.DefaultThreshold,
 		DefaultIncludeVideos: st.DefaultIncludeVideos,
+		DefaultIncludeTexts:  st.DefaultIncludeTexts,
+		DefaultTextThreshold: st.DefaultTextThreshold,
+		DefaultTextWorkers:   st.DefaultTextWorkers,
 		DefaultFrameCount:    st.DefaultFrameCount,
 		DefaultWorkers:       st.DefaultWorkers,
 		DefaultVideoWorkers:  st.DefaultVideoWorkers,
@@ -415,6 +431,9 @@ func (a *App) SaveSettings(dto SettingsDTO) error {
 	st := project.Settings{
 		DefaultThreshold:     dto.DefaultThreshold,
 		DefaultIncludeVideos: dto.DefaultIncludeVideos,
+		DefaultIncludeTexts:  dto.DefaultIncludeTexts,
+		DefaultTextThreshold: dto.DefaultTextThreshold,
+		DefaultTextWorkers:   dto.DefaultTextWorkers,
 		DefaultFrameCount:    dto.DefaultFrameCount,
 		DefaultWorkers:       dto.DefaultWorkers,
 		DefaultVideoWorkers:  dto.DefaultVideoWorkers,
@@ -472,6 +491,9 @@ func (a *App) runScan(ctx context.Context, p project.Project, st *scanState) {
 		Recursive:     p.Recursive,
 		IncludeImages: p.IncludeImages,
 		IncludeVideos: p.IncludeVideos,
+		IncludeTexts:  p.IncludeTexts,
+		TextThreshold: p.TextThreshold,
+		TextWorkers:   p.TextWorkers,
 		Workers:       p.Workers,
 		VideoWorkers:  p.VideoWorkers,
 		FrameCount:    p.FrameCount,
@@ -577,6 +599,8 @@ func groupTypeLabel(t string) string {
 		return "视觉近似图片"
 	case "similar_video":
 		return "视觉近似视频"
+	case "similar_text":
+		return "文本近似重复"
 	default:
 		return t
 	}
@@ -745,7 +769,9 @@ func (a *App) GetGroup(projectID string, groupID int64) (GroupDetailDTO, error) 
 			item.MediaType = "video"
 		} else {
 			lower := strings.ToLower(it.Path)
-			if strings.HasSuffix(lower, ".mp4") || strings.HasSuffix(lower, ".mov") || strings.HasSuffix(lower, ".mkv") {
+			if strings.HasSuffix(lower, ".txt") {
+				item.MediaType = "text"
+			} else if strings.HasSuffix(lower, ".mp4") || strings.HasSuffix(lower, ".mov") || strings.HasSuffix(lower, ".mkv") {
 				item.MediaType = "video"
 			} else {
 				item.MediaType = "image"

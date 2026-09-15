@@ -148,6 +148,9 @@ func Classify(path string) (model.MediaType, bool) {
 	if _, ok := config.VideoExtensions[ext]; ok {
 		return model.MediaVideo, true
 	}
+	if _, ok := config.TextExtensions[ext]; ok {
+		return model.MediaText, true
+	}
 	return "", false
 }
 

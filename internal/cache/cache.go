@@ -93,6 +93,15 @@ CREATE TABLE IF NOT EXISTS perceptual_hashes (
     hash_size INTEGER NOT NULL,
     FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS text_facts (
+    file_id INTEGER PRIMARY KEY,
+    size_bytes INTEGER NOT NULL,
+    normalized_length INTEGER NOT NULL,
+    name_key TEXT NOT NULL,
+    features_json TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS duplicate_groups (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     scan_run_id INTEGER,
@@ -274,6 +283,40 @@ func (c *Cache) LoadFileHash(fileID int64) (string, bool, error) {
 		return "", false, nil
 	}
 	return full.String, true, nil
+}
+
+func (c *Cache) SaveTextFact(fileID, sizeBytes int64, length int, name string, features []uint64) error {
+	b, err := json.Marshal(features)
+	if err != nil {
+		return err
+	}
+	_, err = c.db.Exec(`
+INSERT INTO text_facts (file_id, size_bytes, normalized_length, name_key, features_json, version)
+VALUES (?, ?, ?, ?, ?, 1)
+ON CONFLICT(file_id) DO UPDATE SET
+  size_bytes=excluded.size_bytes,
+  normalized_length=excluded.normalized_length,
+  name_key=excluded.name_key,
+  features_json=excluded.features_json,
+  version=excluded.version
+`, fileID, sizeBytes, length, name, string(b))
+	return err
+}
+
+func (c *Cache) LoadTextFact(fileID, sizeBytes int64) (name string, length int, features []uint64, ok bool, err error) {
+	var raw string
+	if err = c.db.QueryRow(`
+SELECT name_key, normalized_length, features_json
+FROM text_facts WHERE file_id = ? AND size_bytes = ? AND version = 1
+`, fileID, sizeBytes).Scan(&name, &length, &raw); err == sql.ErrNoRows {
+		return "", 0, nil, false, nil
+	} else if err != nil {
+		return "", 0, nil, false, err
+	}
+	if err = json.Unmarshal([]byte(raw), &features); err != nil {
+		return "", 0, nil, false, err
+	}
+	return name, length, features, true, nil
 }
 
 func (c *Cache) SaveImageMetadata(fileID int64, m model.ImageMetadata) error {
@@ -755,7 +798,7 @@ func (c *Cache) LatestScanRunID() (int64, bool, error) {
 }
 
 func (c *Cache) Info() (map[string]int, error) {
-	tables := []string{"files", "file_hashes", "media_metadata", "perceptual_hashes", "duplicate_groups", "duplicate_items", "scan_runs", "errors"}
+	tables := []string{"files", "file_hashes", "media_metadata", "perceptual_hashes", "text_facts", "duplicate_groups", "duplicate_items", "scan_runs", "errors"}
 	out := map[string]int{}
 	for _, t := range tables {
 		var n int
@@ -768,7 +811,7 @@ func (c *Cache) Info() (map[string]int, error) {
 }
 
 func (c *Cache) Clear() error {
-	tables := []string{"duplicate_items", "duplicate_groups", "errors", "perceptual_hashes", "media_metadata", "file_hashes", "scan_runs", "files"}
+	tables := []string{"duplicate_items", "duplicate_groups", "errors", "perceptual_hashes", "text_facts", "media_metadata", "file_hashes", "scan_runs", "files"}
 	for _, t := range tables {
 		if _, err := c.db.Exec(`DELETE FROM ` + t); err != nil {
 			return err

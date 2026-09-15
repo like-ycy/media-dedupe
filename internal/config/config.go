@@ -7,15 +7,17 @@ import (
 )
 
 const (
-	DefaultSimilarityThreshold = 0.80
-	DefaultWorkers             = 2
-	DefaultVideoWorkers        = 1
-	DefaultFrameCount          = 8
-	DefaultFrameFailureLimit   = 3
-	DefaultReviewDelta         = 0.02
-	MaxImagePixels             = 100_000_000
-	FFmpegTimeoutSeconds       = 30
-	ThumbLongEdge              = 480
+	DefaultSimilarityThreshold     = 0.80
+	DefaultWorkers                 = 2
+	DefaultVideoWorkers            = 1
+	DefaultFrameCount              = 8
+	DefaultTextWorkers             = 8
+	DefaultTextSimilarityThreshold = 0.92
+	DefaultFrameFailureLimit       = 3
+	DefaultReviewDelta             = 0.02
+	MaxImagePixels                 = 100_000_000
+	FFmpegTimeoutSeconds           = 30
+	ThumbLongEdge                  = 480
 )
 
 var ImageExtensions = map[string]struct{}{
@@ -29,6 +31,8 @@ var VideoExtensions = map[string]struct{}{
 	".webm": {}, ".m4v": {}, ".flv": {}, ".wmv": {},
 	".mpeg": {}, ".mpg": {},
 }
+
+var TextExtensions = map[string]struct{}{".txt": {}}
 
 var SkippedDirNames = map[string]struct{}{
 	".git": {}, ".venv": {}, "__pycache__": {}, ".DS_Store": {},

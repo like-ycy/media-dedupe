@@ -24,7 +24,7 @@ function createMock() {
   return {
     AppReady: async () => ({
       version: '1.0.0-dev', ffmpeg: true, ffprobe: true, appData: '/tmp/media-dedupe',
-      deleteMode: 'recycle', engine: 'SQLite + SHA-256 + pHash + FFmpeg', platform: 'preview',
+      deleteMode: 'recycle', engine: 'SQLite + SHA-256 + pHash + TXT 指纹 + FFmpeg', platform: 'preview',
     }),
     ListProjects: async () => projects.slice(),
     GetProject: async (id) => {
@@ -37,7 +37,8 @@ function createMock() {
         id: 'prj_' + nextId++, name: input.name || '未命名', createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(), paths: input.paths || [], recursive: true,
         threshold: input.threshold || 0.8, includeImages: input.includeImages !== false,
-        includeVideos: input.includeVideos !== false, frameCount: input.frameCount || 8,
+        includeVideos: input.includeVideos !== false, includeTexts: input.includeTexts !== false,
+        textThreshold: input.textThreshold || 0.92, textWorkers: input.textWorkers || 8, frameCount: input.frameCount || 8,
         workers: input.workers || 2, videoWorkers: input.videoWorkers || 1,
         enableThumbs: true, lastScanAt: null,
         lastSummary: { filesSeen: 0, groups: 0, reclaimableBytes: 0, exactGroups: 0, similarGroups: 0, pendingGroups: 0 },
@@ -61,6 +62,7 @@ function createMock() {
     ListRecentDirs: async () => ['/tmp', '/Users/demo/Pictures'],
     GetSettings: async () => ({
       defaultThreshold: 0.8, defaultIncludeVideos: true, defaultFrameCount: 8, defaultWorkers: 2,
+      defaultIncludeTexts: true, defaultTextThreshold: 0.92, defaultTextWorkers: 8,
       defaultVideoWorkers: 1, defaultDeleteMode: 'recycle', allowPermanentDelete: false,
       ffmpegPath: '', ffprobePath: '', ffmpegAvailable: true, ffprobeAvailable: true,
     }),
@@ -101,7 +103,7 @@ function fmtDateTime(s) {
   } catch { return s; }
 }
 function typeLabel(t) {
-  return ({ exact: '精确重复', similar_image: '视觉近似图片', similar_video: '视觉近似视频' })[t] || t;
+  return ({ exact: '精确重复', similar_image: '视觉近似图片', similar_video: '视觉近似视频', similar_text: '文本近似重复' })[t] || t;
 }
 function toast(msg, kind = '') {
   const root = document.getElementById('toastRoot');
@@ -280,6 +282,8 @@ async function renderConfig() {
       </div>
       <div class="check-row"><input type="checkbox" class="checkbox" id="cfgImages" ${p.includeImages ? 'checked' : ''}/> 启用图片 pHash（HEIC/HEIF 仅精确）</div>
       <div class="check-row"><input type="checkbox" class="checkbox" id="cfgVideos" ${p.includeVideos ? 'checked' : ''}/> 启用视频（FFmpeg 抽帧多帧 pHash）</div>
+      <div class="check-row"><input type="checkbox" class="checkbox" id="cfgTexts" ${p.includeTexts ? 'checked' : ''}/> 启用 TXT 小说正文去重</div>
+      <div class="form-row"><label>TXT 正文相似度</label><input type="number" id="cfgTextThreshold" min="0.8" max="0.99" step="0.01" value="${p.textThreshold || 0.92}" /></div>
       <div class="form-row">
         <label>视频抽帧数</label>
         <input type="number" id="cfgFrames" min="1" max="32" value="${p.frameCount}" />
@@ -287,6 +291,7 @@ async function renderConfig() {
       </div>
       <div class="form-row"><label>图片/哈希并发</label><input type="number" id="cfgWorkers" min="1" max="16" value="${p.workers}" /></div>
       <div class="form-row"><label>视频抽帧并发</label><input type="number" id="cfgVWorkers" min="1" max="8" value="${p.videoWorkers}" /></div>
+      <div class="form-row"><label>TXT 并发</label><input type="number" id="cfgTextWorkers" min="1" max="16" value="${p.textWorkers || 8}" /></div>
       <div class="check-row"><input type="checkbox" class="checkbox" id="cfgRecursive" ${p.recursive ? 'checked' : ''}/> 递归子目录</div>
       <div class="check-row"><input type="checkbox" class="checkbox" id="cfgThumbs" ${p.enableThumbs ? 'checked' : ''}/> 生成缩略图</div>
       ${!state.appInfo?.ffmpeg ? `<div class="warn-banner">未检测到 FFmpeg / ffprobe。视频阶段将跳过；图片 SHA-256 + pHash 仍可用。可在「全局设置」配置路径。</div>` : ''}
@@ -298,7 +303,8 @@ const STAGES = [
   { key: 'exact', title: '2. 精确哈希 (SHA-256)' },
   { key: 'image', title: '3. 图片感知哈希 (pHash)' },
   { key: 'video', title: '4. 视频抽帧 (FFmpeg)' },
-  { key: 'match', title: '5. 分组匹配' },
+  { key: 'text', title: '5. TXT 正文相似度' },
+  { key: 'match', title: '6. 分组匹配' },
 ];
 
 async function renderProgress() {
@@ -429,6 +435,7 @@ async function renderResults() {
         <option value="exact" ${filter.groupType === 'exact' ? 'selected' : ''}>精确重复</option>
         <option value="similar_image" ${filter.groupType === 'similar_image' ? 'selected' : ''}>近似图片</option>
         <option value="similar_video" ${filter.groupType === 'similar_video' ? 'selected' : ''}>近似视频</option>
+        <option value="similar_text" ${filter.groupType === 'similar_text' ? 'selected' : ''}>近似 TXT</option>
       </select>
       <select id="sortFilter">
         <option value="id" ${sortBy === 'id' ? 'selected' : ''}>按组号</option>
@@ -537,7 +544,10 @@ async function renderSettings() {
       <div class="form-row"><label>默认视频抽帧数</label><input type="number" id="setFrames" min="1" max="32" value="${s.defaultFrameCount}" /></div>
       <div class="form-row"><label>默认图片并发</label><input type="number" id="setWorkers" min="1" max="16" value="${s.defaultWorkers}" /></div>
       <div class="form-row"><label>默认视频并发</label><input type="number" id="setVWorkers" min="1" max="8" value="${s.defaultVideoWorkers}" /></div>
+      <div class="form-row"><label>默认 TXT 并发</label><input type="number" id="setTextWorkers" min="1" max="16" value="${s.defaultTextWorkers || 8}" /></div>
       <div class="check-row"><input type="checkbox" class="checkbox" id="setVideos" ${s.defaultIncludeVideos ? 'checked' : ''}/> 默认启用视频</div>
+      <div class="check-row"><input type="checkbox" class="checkbox" id="setTexts" ${s.defaultIncludeTexts !== false ? 'checked' : ''}/> 默认启用 TXT</div>
+      <div class="form-row"><label>默认 TXT 相似度</label><input type="number" id="setTextThreshold" min="0.8" max="0.99" step="0.01" value="${s.defaultTextThreshold || 0.92}" /></div>
       <div class="form-row">
         <label>默认删除模式</label>
         <select id="setDeleteMode">
@@ -692,6 +702,9 @@ function bindMain() {
     const dto = {
       defaultThreshold: Number($('#setThreshold').value) || 0.8,
       defaultIncludeVideos: $('#setVideos').checked,
+      defaultIncludeTexts: $('#setTexts').checked,
+      defaultTextThreshold: Number($('#setTextThreshold').value) || 0.92,
+      defaultTextWorkers: Number($('#setTextWorkers').value) || 8,
       defaultFrameCount: Number($('#setFrames').value) || 8,
       defaultWorkers: Number($('#setWorkers').value) || 2,
       defaultVideoWorkers: Number($('#setVWorkers').value) || 1,
@@ -723,6 +736,9 @@ async function saveConfig() {
     threshold: Number($('#cfgThreshold').value) || 0.8,
     includeImages: $('#cfgImages').checked,
     includeVideos: $('#cfgVideos').checked,
+    includeTexts: $('#cfgTexts').checked,
+    textThreshold: Number($('#cfgTextThreshold').value) || 0.92,
+    textWorkers: Number($('#cfgTextWorkers')?.value) || 8,
     frameCount: Number($('#cfgFrames').value) || 8,
     workers: Number($('#cfgWorkers').value) || 2,
     videoWorkers: Number($('#cfgVWorkers').value) || 1,
@@ -785,6 +801,9 @@ async function openCreateProjectModal() {
         name, paths, recursive: true, threshold: state.settings?.defaultThreshold || 0.8,
         includeImages: root.querySelector('#npImages').checked,
         includeVideos: root.querySelector('#npVideos').checked,
+        includeTexts: state.settings?.defaultIncludeTexts !== false,
+        textThreshold: state.settings?.defaultTextThreshold || 0.92,
+        textWorkers: state.settings?.defaultTextWorkers || 8,
         frameCount: state.settings?.defaultFrameCount || 8,
         workers: state.settings?.defaultWorkers || 2,
         videoWorkers: state.settings?.defaultVideoWorkers || 1,

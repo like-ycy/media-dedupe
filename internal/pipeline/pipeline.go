@@ -24,6 +24,7 @@ import (
 	"media-dedupe/internal/model"
 	"media-dedupe/internal/progress"
 	"media-dedupe/internal/score"
+	"media-dedupe/internal/textdedupe"
 	"media-dedupe/internal/video"
 )
 
@@ -36,6 +37,9 @@ type Options struct {
 	Recursive     bool
 	IncludeImages bool
 	IncludeVideos bool
+	IncludeTexts  bool
+	TextThreshold float64
+	TextWorkers   int
 	Workers       int
 	VideoWorkers  int
 	FrameCount    int
@@ -97,6 +101,12 @@ func Scan(opts Options) (*Result, error) {
 	if opts.Threshold <= 0 {
 		opts.Threshold = config.DefaultSimilarityThreshold
 	}
+	if opts.TextThreshold <= 0 {
+		opts.TextThreshold = config.DefaultTextSimilarityThreshold
+	}
+	if opts.TextWorkers < 1 {
+		opts.TextWorkers = config.DefaultTextWorkers
+	}
 	ctx := opts.context()
 
 	startWall := time.Now()
@@ -109,13 +119,16 @@ func Scan(opts Options) (*Result, error) {
 	defer c.Close()
 
 	scanRunID, err := c.StartScanRun(opts.Paths, map[string]any{
-		"similarity":    opts.Threshold,
-		"recursive":     opts.Recursive,
-		"include_image": opts.IncludeImages,
-		"include_video": opts.IncludeVideos,
-		"workers":       opts.Workers,
-		"video_workers": opts.VideoWorkers,
-		"frames":        opts.FrameCount,
+		"similarity":      opts.Threshold,
+		"recursive":       opts.Recursive,
+		"include_image":   opts.IncludeImages,
+		"include_video":   opts.IncludeVideos,
+		"include_text":    opts.IncludeTexts,
+		"text_similarity": opts.TextThreshold,
+		"text_workers":    opts.TextWorkers,
+		"workers":         opts.Workers,
+		"video_workers":   opts.VideoWorkers,
+		"frames":          opts.FrameCount,
 	})
 	if err != nil {
 		return nil, err
@@ -132,10 +145,10 @@ func Scan(opts Options) (*Result, error) {
 		errsMu.Unlock()
 		_ = c.RecordError(scanRunID, path, stage, message)
 		opts.emit(progress.Event{
-			Stage:    progress.StageError,
-			Phase:    "error",
-			Message:  message,
-			Errors:   n,
+			Stage:       progress.StageError,
+			Phase:       "error",
+			Message:     message,
+			Errors:      n,
 			CurrentFile: path,
 		})
 	}
@@ -161,6 +174,9 @@ func Scan(opts Options) (*Result, error) {
 			continue
 		}
 		if d.MediaType == model.MediaVideo && !opts.IncludeVideos {
+			continue
+		}
+		if d.MediaType == model.MediaText && !opts.IncludeTexts {
 			continue
 		}
 		files = append(files, d)
@@ -228,6 +244,31 @@ func Scan(opts Options) (*Result, error) {
 			emit(progress.Event{Stage: progress.StageVideo, Phase: "done", Message: fmt.Sprintf("近似视频 %d 组", len(similarVideoGroups)), Percent: 80, FilesSeen: len(files), FoundExact: exactCount, FoundSimilar: similarCount, ProjectID: opts.ProjectID})
 		}
 	}
+	var similarTextGroups []model.ReportGroup
+	if opts.IncludeTexts && ctx.Err() == nil {
+		emit(progress.Event{Stage: progress.StageText, Phase: "running", Message: "TXT 正文相似度分析...", Percent: 82, FilesSeen: len(files), ProjectID: opts.ProjectID})
+		textFiles := make([]model.DiscoveredFile, 0)
+		textIDs := make([]int64, 0)
+		textUnchanged := make([]bool, 0)
+		for i, file := range files {
+			if file.MediaType != model.MediaText {
+				continue
+			}
+			if _, used := usedPaths[file.Path]; used {
+				continue
+			}
+			textFiles = append(textFiles, file)
+			textIDs = append(textIDs, infos[i].fileID)
+			textUnchanged = append(textUnchanged, infos[i].unchanged)
+		}
+		facts, textErrs := textdedupe.FactsCached(textFiles, textIDs, textUnchanged, opts.TextWorkers, c)
+		for _, textErr := range textErrs {
+			recordErr(textErr.Path, textErr.Stage, textErr.Message)
+		}
+		similarTextGroups = textdedupe.Groups(facts, opts.TextThreshold)
+		similarCount += len(similarTextGroups)
+		emit(progress.Event{Stage: progress.StageText, Phase: "done", Message: fmt.Sprintf("文本近似重复 %d 组", len(similarTextGroups)), Percent: 84, FilesSeen: len(files), FoundSimilar: similarCount, ProjectID: opts.ProjectID})
+	}
 
 	if err := ctx.Err(); err != nil {
 		_ = c.FinishScanRun(scanRunID, len(files), len(reportErrs))
@@ -237,7 +278,7 @@ func Scan(opts Options) (*Result, error) {
 
 	emit(progress.Event{Stage: progress.StageMatch, Phase: "done", Message: "分组匹配完成", Percent: 85, FilesSeen: len(files), FoundExact: exactCount, FoundSimilar: similarCount, ProjectID: opts.ProjectID})
 
-	groups := make([]model.ReportGroup, 0, len(exactGroups)+len(similarImageGroups)+len(similarVideoGroups))
+	groups := make([]model.ReportGroup, 0, len(exactGroups)+len(similarImageGroups)+len(similarVideoGroups)+len(similarTextGroups))
 	nextID := int64(1)
 	for _, g := range exactGroups {
 		g.GroupID = nextID
@@ -252,6 +293,12 @@ func Scan(opts Options) (*Result, error) {
 		groups = append(groups, g)
 	}
 	for _, g := range similarVideoGroups {
+		g.GroupID = nextID
+		g.StableKey = groupStableKey(g)
+		nextID++
+		groups = append(groups, g)
+	}
+	for _, g := range similarTextGroups {
 		g.GroupID = nextID
 		g.StableKey = groupStableKey(g)
 		nextID++
@@ -434,6 +481,9 @@ func qualityFor(
 	unchanged bool,
 	recordErr func(path, stage, message string),
 ) float64 {
+	if f.MediaType == model.MediaText {
+		return score.TextQuality(f.SizeBytes)
+	}
 	if f.MediaType == model.MediaImage {
 		meta := loadImageMeta(c, f, fileID, unchanged, recordErr)
 		return score.ImageQuality(meta, f.SizeBytes)
