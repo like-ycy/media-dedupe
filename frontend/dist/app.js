@@ -59,6 +59,7 @@ function createMock() {
       if (i >= 0) projects.splice(i, 1);
     },
     CheckPaths: async (paths) => (paths || []).map((path) => ({ path, exists: path && !path.includes('missing'), isDir: true, error: path && path.includes('missing') ? '路径不存在' : '' })),
+    SelectDirectory: async () => '',
     ListRecentDirs: async () => ['/tmp', '/Users/demo/Pictures'],
     GetSettings: async () => ({
       defaultThreshold: 0.8, defaultIncludeVideos: true, defaultFrameCount: 8, defaultWorkers: 2,
@@ -771,6 +772,7 @@ async function openCreateProjectModal() {
         <div class="form-row"><label>项目名称</label><input type="text" id="npName" placeholder="例如：2024 家庭照片" /></div>
         ${recentHtml}
         <div class="form-row"><label>扫描目录（每行一个绝对路径）</label><textarea id="npPaths" placeholder="/Users/you/Pictures&#10;/Users/you/Movies"></textarea>
+          <button type="button" class="btn" id="npSelectDirectory">选择目录</button>
           <div class="hint">可先填目录；无效路径会在配置页标红。</div>
         </div>
         <div class="check-row"><input type="checkbox" class="checkbox" id="npImages" checked /> 启用图片 pHash</div>
@@ -789,6 +791,18 @@ async function openCreateProjectModal() {
       ta.value = lines.join('\n');
     };
   });
+  root.querySelector('#npSelectDirectory').onclick = async () => {
+    try {
+      const path = await api.SelectDirectory();
+      if (!path) return;
+      const ta = root.querySelector('#npPaths');
+      const lines = ta.value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      if (!lines.includes(path)) lines.push(path);
+      ta.value = lines.join('\n');
+    } catch (e) {
+      toast(String(e.message || e), 'error');
+    }
+  };
   const close = () => { root.hidden = true; root.innerHTML = ''; };
   root.querySelector('#npCancel').onclick = close;
   root.querySelector('#npOk').onclick = async () => {

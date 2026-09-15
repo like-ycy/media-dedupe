@@ -64,21 +64,23 @@ type fileCacheInfo struct {
 }
 
 type imageFacts struct {
-	fileID  int64
-	path    string
-	size    int64
-	meta    model.ImageMetadata
-	phash   string
-	quality float64
+	fileID    int64
+	path      string
+	extension string
+	size      int64
+	meta      model.ImageMetadata
+	phash     string
+	quality   float64
 }
 
 type videoFacts struct {
-	fileID  int64
-	path    string
-	size    int64
-	meta    model.VideoMetadata
-	hashes  []string
-	quality float64
+	fileID    int64
+	path      string
+	extension string
+	size      int64
+	meta      model.VideoMetadata
+	hashes    []string
+	quality   float64
 }
 
 func (o *Options) context() context.Context {
@@ -265,7 +267,14 @@ func Scan(opts Options) (*Result, error) {
 		for _, textErr := range textErrs {
 			recordErr(textErr.Path, textErr.Stage, textErr.Message)
 		}
-		similarTextGroups = textdedupe.Groups(facts, opts.TextThreshold)
+		factsByExtension := make(map[string][]textdedupe.Fact)
+		for _, fact := range facts {
+			extension := strings.ToLower(filepath.Ext(fact.Path))
+			factsByExtension[extension] = append(factsByExtension[extension], fact)
+		}
+		for _, facts := range factsByExtension {
+			similarTextGroups = append(similarTextGroups, textdedupe.Groups(facts, opts.TextThreshold)...)
+		}
 		similarCount += len(similarTextGroups)
 		emit(progress.Event{Stage: progress.StageText, Phase: "done", Message: fmt.Sprintf("文本近似重复 %d 组", len(similarTextGroups)), Percent: 84, FilesSeen: len(files), FoundSimilar: similarCount, ProjectID: opts.ProjectID})
 	}
@@ -383,12 +392,17 @@ func exactPass(
 	emit func(progress.Event),
 ) ([]model.ReportGroup, map[string]struct{}) {
 	used := map[string]struct{}{}
-	sizeBuckets := map[int64][]int{}
+	type exactBucketKey struct {
+		size int64
+		ext  string
+	}
+	sizeBuckets := map[exactBucketKey][]int{}
 	for i, f := range files {
 		if infos[i].fileID == 0 {
 			continue
 		}
-		sizeBuckets[f.SizeBytes] = append(sizeBuckets[f.SizeBytes], i)
+		key := exactBucketKey{size: f.SizeBytes, ext: strings.ToLower(f.Extension)}
+		sizeBuckets[key] = append(sizeBuckets[key], i)
 	}
 
 	var groups []model.ReportGroup
@@ -589,12 +603,13 @@ func collectImages(
 				_ = c.SavePerceptualHashes(fileID, "image_phash", []string{phash})
 			}
 			out[j] = &imageFacts{
-				fileID:  fileID,
-				path:    f.Path,
-				size:    f.SizeBytes,
-				meta:    meta,
-				phash:   phash,
-				quality: score.ImageQuality(meta, f.SizeBytes),
+				fileID:    fileID,
+				path:      f.Path,
+				extension: strings.ToLower(f.Extension),
+				size:      f.SizeBytes,
+				meta:      meta,
+				phash:     phash,
+				quality:   score.ImageQuality(meta, f.SizeBytes),
 			}
 			return nil
 		})
@@ -611,6 +626,19 @@ func collectImages(
 }
 
 func imageSimilarity(facts []imageFacts, opts Options) []model.ReportGroup {
+	byExtension := make(map[string][]imageFacts)
+	for _, fact := range facts {
+		extension := strings.ToLower(fact.extension)
+		byExtension[extension] = append(byExtension[extension], fact)
+	}
+	var groups []model.ReportGroup
+	for _, bucket := range byExtension {
+		groups = append(groups, imageSimilarityByExtension(bucket, opts)...)
+	}
+	return groups
+}
+
+func imageSimilarityByExtension(facts []imageFacts, opts Options) []model.ReportGroup {
 	if len(facts) < 2 {
 		return nil
 	}
@@ -716,12 +744,13 @@ func collectVideos(
 				exportFramePreviews(f.Path, meta, fileID, opts.FrameDir, opts.FrameCount)
 			}
 			fact := &videoFacts{
-				fileID:  fileID,
-				path:    f.Path,
-				size:    f.SizeBytes,
-				meta:    meta,
-				hashes:  hashes,
-				quality: score.VideoQuality(meta),
+				fileID:    fileID,
+				path:      f.Path,
+				extension: strings.ToLower(f.Extension),
+				size:      f.SizeBytes,
+				meta:      meta,
+				hashes:    hashes,
+				quality:   score.VideoQuality(meta),
 			}
 			slotMu.Lock()
 			out[j] = fact
@@ -780,6 +809,19 @@ func saveFramePreviews(c *cache.Cache, frameDir string) {
 }
 
 func videoSimilarity(facts []videoFacts, opts Options) []model.ReportGroup {
+	byExtension := make(map[string][]videoFacts)
+	for _, fact := range facts {
+		extension := strings.ToLower(fact.extension)
+		byExtension[extension] = append(byExtension[extension], fact)
+	}
+	var groups []model.ReportGroup
+	for _, bucket := range byExtension {
+		groups = append(groups, videoSimilarityByExtension(bucket, opts)...)
+	}
+	return groups
+}
+
+func videoSimilarityByExtension(facts []videoFacts, opts Options) []model.ReportGroup {
 	if len(facts) < 2 {
 		return nil
 	}

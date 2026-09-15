@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"media-dedupe/internal/cache"
 	"media-dedupe/internal/hashfile"
 	"media-dedupe/internal/mediastore"
@@ -375,6 +376,13 @@ func (a *App) ListRecentDirs() []string {
 		return []string{}
 	}
 	return dirs
+}
+
+func (a *App) SelectDirectory() (string, error) {
+	if a.ctx == nil {
+		return "", errors.New("应用尚未初始化")
+	}
+	return wailsruntime.OpenDirectoryDialog(a.ctx, wailsruntime.OpenDialogOptions{Title: "选择扫描目录"})
 }
 
 func (a *App) CheckPaths(paths []string) []PathStatus {
