@@ -210,6 +210,11 @@ func (a *App) Startup(ctx context.Context) {
 	a.store = store
 	a.media = mediastore.New()
 	_ = a.media.AllowRoot(filepath.Join(store.Root(), "projects"))
+	if st, err := store.LoadSettings(); err == nil {
+		video.ConfigureTools(st.FFmpegPath, st.FFprobePath)
+	} else {
+		video.ConfigureTools("", "")
+	}
 	go a.checkUpdateOnStartup()
 }
 
@@ -458,7 +463,11 @@ func (a *App) SaveSettings(dto SettingsDTO) error {
 		FFmpegPath:           dto.FFmpegPath,
 		FFprobePath:          dto.FFprobePath,
 	}
-	return a.store.SaveSettings(st)
+	if err := a.store.SaveSettings(st); err != nil {
+		return err
+	}
+	video.ConfigureTools(st.FFmpegPath, st.FFprobePath)
+	return nil
 }
 
 func (a *App) StartScan(projectID string) error {

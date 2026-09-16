@@ -32,19 +32,12 @@ type probePayload struct {
 	} `json:"format"`
 }
 
-// Available reports whether ffmpeg and ffprobe exist on PATH.
-func Available() (ffmpeg, ffprobe bool) {
-	_, errFfmpeg := exec.LookPath("ffmpeg")
-	_, errFfprobe := exec.LookPath("ffprobe")
-	return errFfmpeg == nil, errFfprobe == nil
-}
-
 // ProbeMetadata runs ffprobe and parses video metadata.
 func ProbeMetadata(path string) model.VideoMetadata {
 	ctx, cancel := context.WithTimeout(context.Background(), config.FFmpegTimeoutSeconds*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "ffprobe",
+	cmd := exec.CommandContext(ctx, ffprobeBin(),
 		"-v", "error",
 		"-print_format", "json",
 		"-show_format",
@@ -141,7 +134,7 @@ func ExtractFrame(path string, timestampMs int64, outPath string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), config.FFmpegTimeoutSeconds*time.Second)
 	defer cancel()
 	sec := float64(timestampMs) / 1000.0
-	cmd := exec.CommandContext(ctx, "ffmpeg",
+	cmd := exec.CommandContext(ctx, ffmpegBin(),
 		"-y",
 		"-ss", fmt.Sprintf("%.3f", sec),
 		"-i", path,
@@ -227,7 +220,7 @@ func ExtractFrames(path string, meta model.VideoMetadata, frameCount int, tmpDir
 	args = append(args, "-an", "-frames:v", strconv.Itoa(len(timestamps)), "-q:v", "2", filepath.Join(tmpDir, "frame-%03d.jpg"))
 	ctx, cancel := context.WithTimeout(context.Background(), config.FFmpegTimeoutSeconds*time.Second)
 	defer cancel()
-	if err := exec.CommandContext(ctx, "ffmpeg", args...).Run(); err != nil {
+	if err := exec.CommandContext(ctx, ffmpegBin(), args...).Run(); err != nil {
 		return nil, fmt.Errorf("extract frames: %w", err)
 	}
 	paths := make([]string, 0, len(timestamps))

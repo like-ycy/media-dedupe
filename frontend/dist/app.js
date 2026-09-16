@@ -578,8 +578,8 @@ async function renderSettings() {
         <input type="checkbox" class="checkbox" id="setAllowPerm" ${s.allowPermanentDelete ? 'checked' : ''}/>
         <span>允许永久删除（需额外确认，文件无法从回收站还原）</span>
       </div>
-      <div class="form-row"><label>FFmpeg 路径（可选，空则用 PATH）</label><input type="text" id="setFFmpeg" value="${esc(s.ffmpegPath || '')}" placeholder="例如 /usr/local/bin/ffmpeg" /></div>
-      <div class="form-row"><label>ffprobe 路径（可选）</label><input type="text" id="setFFprobe" value="${esc(s.ffprobePath || '')}" /></div>
+      <div class="form-row"><label>FFmpeg 路径（可选，空则自动探测 PATH/常见安装目录）</label><input type="text" id="setFFmpeg" value="${esc(s.ffmpegPath || '')}" placeholder="例如 /opt/homebrew/bin/ffmpeg 或 C:\\ffmpeg\\bin\\ffmpeg.exe" /></div>
+      <div class="form-row"><label>ffprobe 路径（可选）</label><input type="text" id="setFFprobe" value="${esc(s.ffprobePath || '')}" placeholder="与 ffmpeg 同目录时通常只需指定 ffmpeg" /></div>
       <div class="muted">应用数据目录：${esc(state.appInfo?.appData || '')}</div>
     </div>
     <div class="card about-card">

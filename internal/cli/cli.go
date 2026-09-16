@@ -271,7 +271,7 @@ func NewRootCmd() *cobra.Command {
 			fmt.Printf("ffmpeg: %s\n", pathStatus(ffmpeg))
 			fmt.Printf("ffprobe: %s\n", pathStatus(ffprobe))
 			if !ffmpeg || !ffprobe {
-				fmt.Println("note: video similarity requires ffmpeg and ffprobe on PATH")
+				fmt.Println("note: video similarity requires ffmpeg and ffprobe on PATH or common install locations")
 			}
 			if err := exec.Command("go", "version").Run(); err == nil {
 				// informational only
