@@ -71,6 +71,7 @@ jobs:
             -o "${OUT}"
 
           mkdir -p out
+          ASSET="aap_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
 
           if [ "${{ matrix.goos }}" = "windows" ]; then
             if [ -f "build/bin/${OUT}" ]; then
@@ -80,9 +81,7 @@ jobs:
             fi
             test -f "$BIN"
             ls -la build/bin "$BIN" || true
-            # Windows runners have no zip(1); use PowerShell Compress-Archive
-            powershell.exe -NoProfile -Command \
-              "Compress-Archive -Force -Path '$BIN' -DestinationPath 'out/media-dedupe-app_${VERSION}_windows_${{ matrix.goarch }}.zip'"
+            tar czf "out/${ASSET}" -C "$(dirname "$BIN")" "$(basename "$BIN")"
           else
             APP="build/bin/media-dedupe-app.app"
             if [ ! -d "$APP" ]; then
@@ -90,7 +89,7 @@ jobs:
             fi
             test -d "$APP"
             ls -la build/bin "$APP" || true
-            tar czf "out/media-dedupe-app_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz" \
+            tar czf "out/${ASSET}" \
               -C build/bin "$(basename "$APP")"
           fi
 

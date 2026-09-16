@@ -35,8 +35,8 @@ App 入口：
 
 | 平台 | 架构 | 产物 |
 |---|---|---|
-| macOS | arm64 / amd64 | `media-dedupe-app_*.tar.gz`（`.app`） |
-| Windows | amd64 | `media-dedupe-app_*.zip`（单文件 exe，无安装包） |
+| macOS | arm64 / amd64 | `aap_{ver}_darwin_{arch}.tar.gz`（`.app`） |
+| Windows | amd64 | `aap_{ver}_windows_amd64.tar.gz`（单文件 exe，无安装包） |
 
 Windows 为便携版：解压后双击 `media-dedupe-app.exe` 即可使用，不生成 NSIS 安装程序。
 

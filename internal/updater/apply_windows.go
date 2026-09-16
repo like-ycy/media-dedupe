@@ -3,9 +3,7 @@
 package updater
 
 import (
-	"archive/zip"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,10 +12,10 @@ import (
 	"syscall"
 )
 
-// ApplyAndRestart 在 Windows 上解压 zip 中的 exe，替换当前程序并重启。
+// ApplyAndRestart 在 Windows 上解压 tar.gz 中的 exe，替换当前程序并重启。
 // 运行中的 exe 有文件锁，由隐藏窗口批处理等待退出后完成替换。
 func (m *Manager) ApplyAndRestart() error {
-	zipPath, tempDir, err := m.GetDownloadedFile()
+	pkgPath, tempDir, err := m.GetDownloadedFile()
 	if err != nil {
 		return err
 	}
@@ -27,7 +25,7 @@ func (m *Manager) ApplyAndRestart() error {
 		return fmt.Errorf("创建解压目录失败: %w", err)
 	}
 
-	if err := extractZip(zipPath, extractedDir); err != nil {
+	if err := extractTarGz(pkgPath, extractedDir); err != nil {
 		return fmt.Errorf("解压更新包失败: %w", err)
 	}
 
@@ -134,50 +132,4 @@ func findExeInDir(dir string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("未找到 .exe 文件")
-}
-
-// extractZip 解压 zip 文件并防止路径穿越。
-func extractZip(zipPath, destDir string) error {
-	r, err := zip.OpenReader(zipPath)
-	if err != nil {
-		return err
-	}
-	defer r.Close()
-
-	for _, f := range r.File {
-		target := filepath.Join(destDir, f.Name)
-		if !strings.HasPrefix(filepath.Clean(target), filepath.Clean(destDir)+string(filepath.Separator)) {
-			continue
-		}
-
-		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(target, f.Mode()); err != nil {
-				return err
-			}
-			continue
-		}
-
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return err
-		}
-
-		rc, err := f.Open()
-		if err != nil {
-			return err
-		}
-		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, f.Mode())
-		if err != nil {
-			rc.Close()
-			return err
-		}
-		_, cpErr := io.Copy(out, rc)
-		rc.Close()
-		if err := out.Close(); err != nil && cpErr == nil {
-			return err
-		}
-		if cpErr != nil {
-			return cpErr
-		}
-	}
-	return nil
 }

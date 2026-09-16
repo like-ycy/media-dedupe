@@ -158,25 +158,13 @@ func (m *Manager) LatestInfo() *UpdateInfo {
 }
 
 // matchAsset 匹配当前系统平台与架构对应的资产。
-// 命名约定（与 release.yml 一致）：
-//   - macOS: media-dedupe-app_{ver}_darwin_{arch}.tar.gz
-//   - Windows: media-dedupe-app_{ver}_windows_{arch}.zip
+// 命名约定（与 release.yml 一致）：aap_{ver}_{goos}_{goarch}.tar.gz
 func matchAsset(assets []ReleaseAsset, goos, goarch string) *ReleaseAsset {
+	wantSuffix := "_" + goos + "_" + goarch + ".tar.gz"
 	for i := range assets {
 		name := strings.ToLower(assets[i].Name)
-		switch goos {
-		case "darwin":
-			if strings.Contains(name, "darwin") && strings.Contains(name, goarch) && strings.HasSuffix(name, ".tar.gz") {
-				return &assets[i]
-			}
-		case "windows":
-			if strings.Contains(name, "windows") && strings.Contains(name, goarch) && strings.HasSuffix(name, ".zip") {
-				return &assets[i]
-			}
-		default:
-			if strings.Contains(name, goos) && strings.Contains(name, goarch) {
-				return &assets[i]
-			}
+		if strings.HasPrefix(name, "aap_") && strings.HasSuffix(name, wantSuffix) {
+			return &assets[i]
 		}
 	}
 	return nil
@@ -203,12 +191,17 @@ func (m *Manager) StartDownload(useProxy bool, onProgress func(DownloadProgress)
 	expectedSize := m.latestInfo.AssetSize
 	expectedDigest := m.latestInfo.Digest
 	if assetName == "" {
-		assetName = "media-dedupe-update"
+		m.mu.Unlock()
+		return fmt.Errorf("更新包文件名无效")
 	}
 	assetName = filepath.Base(assetName)
 	if assetName == "." || assetName == string(filepath.Separator) {
 		m.mu.Unlock()
 		return fmt.Errorf("更新包文件名无效")
+	}
+	if !strings.HasSuffix(strings.ToLower(assetName), ".tar.gz") {
+		m.mu.Unlock()
+		return fmt.Errorf("更新包格式不受支持: %s", assetName)
 	}
 
 	tempDir, err := os.MkdirTemp("", "media-dedupe-update-*")
