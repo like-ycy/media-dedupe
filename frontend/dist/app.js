@@ -177,7 +177,7 @@ async function renderProjects() {
     <div class="toolbar">
       <div>
         <h1>项目列表</h1>
-        <div class="sub">管理本机媒体去重项目，纯离线运行，安全审阅后移入系统回收站</div>
+        <div class="sub">管理本机文件去重项目，纯离线运行，安全审阅后移入系统回收站</div>
       </div>
       <div class="toolbar-actions">
         <button class="btn btn-primary" id="btnNewProject">+ 新建项目</button>

@@ -49,7 +49,7 @@ func Run() {
 	})
 
 	err = wails.Run(&options.App{
-		Title:     "媒体去重工具",
+		Title:     "文件去重助手",
 		Width:     1280,
 		Height:    860,
 		MinWidth:  980,

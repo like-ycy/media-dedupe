@@ -133,7 +133,7 @@ func RenderHTML(groups []model.ReportGroup, errs []model.ReportError, meta model
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Media Dedupe Report</title>
+<title>文件去重助手报告</title>
 <style>
 :root { --bg:#0f1115; --card:#1a1d24; --ink:#e8eaed; --muted:#9aa0a6; --keep:#34a853; --clean:#ea4335; --review:#fbbc04; --line:#2a2f3a; }
 * { box-sizing:border-box; }
@@ -164,7 +164,7 @@ h1 { font-size:22px; margin:0 0 8px; }
 </style>
 </head>
 <body>
-<h1>Media Dedupe Report</h1>
+<h1>文件去重助手报告</h1>
 <div class="summary">
   扫描 <strong>` + fmt.Sprint(meta.FilesSeen) + `</strong> 个文件，
   失败 <strong>` + fmt.Sprint(meta.FilesFailed) + `</strong>，
