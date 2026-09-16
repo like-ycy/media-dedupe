@@ -9,5 +9,8 @@
   "author": {
     "name": "media-dedupe",
     "email": ""
+  },
+  "info": {
+    "productVersion": "1.0.0"
   }
 }

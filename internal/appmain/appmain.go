@@ -64,6 +64,7 @@ func Run() {
 		},
 		Bind: []any{app},
 		OnShutdown: func(ctx context.Context) {
+			app.CleanupUpdater()
 			_ = srv.Close()
 		},
 	})
