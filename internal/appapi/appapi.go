@@ -265,7 +265,10 @@ func (a *App) AppReady() AppInfo {
 func (a *App) toProjectDTO(p project.Project) ProjectDTO {
 	ffmpeg, _ := video.Available()
 	a.mu.Lock()
-	_, scanning := a.scans[p.ID]
+	scanning := false
+	if st, ok := a.scans[p.ID]; ok {
+		scanning = st.status.Running
+	}
 	a.mu.Unlock()
 	return ProjectDTO{
 		ID:            p.ID,
@@ -688,9 +691,8 @@ func (a *App) ListGroups(projectID string, filter GroupFilter) ([]GroupListDTO, 
 				cover = a.mediaURLFromPath(it.ThumbPath)
 			}
 		}
-		if cover == "" && len(g.Items) > 0 {
-			cover = a.mediaURLFromPath(filepath.Join(a.store.ThumbDir(projectID), fmt.Sprintf("%d.jpg", g.Items[0].FileID)))
-		}
+		// Do not invent a thumb URL for missing files — broken <img> looks blank.
+		// Text groups have no thumbs; frontend shows a TXT placeholder.
 		out = append(out, GroupListDTO{
 			GroupID:           g.GroupID,
 			GroupType:         string(g.GroupType),
@@ -765,12 +767,10 @@ func (a *App) GetGroup(projectID string, groupID int64) (GroupDetailDTO, error) 
 			Similarity:    it.Similarity,
 			QualityScore:  it.QualityScore,
 			SizeBytes:     it.SizeBytes,
+			// Only expose real thumb paths; missing thumbs stay empty so the UI can show a placeholder.
 			ThumbURL:      a.mediaURLFromPath(it.ThumbPath),
 			IsRecommended: it.FileID == g.RecommendedFileID,
 			Reasons:       it.Reasons,
-		}
-		if item.ThumbURL == "" {
-			item.ThumbURL = a.mediaURLFromPath(filepath.Join(a.store.ThumbDir(projectID), fmt.Sprintf("%d.jpg", it.FileID)))
 		}
 		if _, err := os.Stat(it.Path); err == nil {
 			item.Exists = true
