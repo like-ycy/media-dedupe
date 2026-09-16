@@ -71,7 +71,7 @@ jobs:
             -o "${OUT}"
 
           mkdir -p out
-          ASSET="aap_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
+          ASSET="media-dedupe-app_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
 
           if [ "${{ matrix.goos }}" = "windows" ]; then
             if [ -f "build/bin/${OUT}" ]; then

@@ -158,12 +158,12 @@ func (m *Manager) LatestInfo() *UpdateInfo {
 }
 
 // matchAsset 匹配当前系统平台与架构对应的资产。
-// 命名约定（与 release.yml 一致）：aap_{ver}_{goos}_{goarch}.tar.gz
+// 命名约定（与 release.yml 一致）：media-dedupe-app_{ver}_{goos}_{goarch}.tar.gz
 func matchAsset(assets []ReleaseAsset, goos, goarch string) *ReleaseAsset {
 	wantSuffix := "_" + goos + "_" + goarch + ".tar.gz"
 	for i := range assets {
 		name := strings.ToLower(assets[i].Name)
-		if strings.HasPrefix(name, "aap_") && strings.HasSuffix(name, wantSuffix) {
+		if strings.HasPrefix(name, "media-dedupe-app_") && strings.HasSuffix(name, wantSuffix) {
 			return &assets[i]
 		}
 	}
