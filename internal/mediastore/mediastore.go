@@ -93,7 +93,8 @@ func (s *Store) URL(path string) string {
 	if base == "" {
 		return ""
 	}
-	return base + "?f=" + encodeAbs(abs)
+	// Trailing slash keeps Go ServeMux "/media/" match without a 307 redirect.
+	return base + "/?f=" + encodeAbs(abs)
 }
 
 // Handler serves media files by absolute path token (f=).

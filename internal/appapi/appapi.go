@@ -3,6 +3,7 @@ package appapi
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -16,8 +17,10 @@ import (
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"media-dedupe/internal/cache"
+	"media-dedupe/internal/config"
 	"media-dedupe/internal/discovery"
 	"media-dedupe/internal/hashfile"
+	imgutil "media-dedupe/internal/imagehash"
 	"media-dedupe/internal/mediastore"
 	"media-dedupe/internal/model"
 	"media-dedupe/internal/ops"
@@ -643,6 +646,49 @@ func (a *App) mediaURLFromPath(path string) string {
 	return a.media.URL(path)
 }
 
+// imageThumbSrc returns an inline data URL so Wails WebView always shows image thumbs.
+func imageThumbSrc(path string) string {
+	if path == "" {
+		return ""
+	}
+	b, err := os.ReadFile(path)
+	if err != nil || len(b) == 0 || len(b) > 2_000_000 {
+		return ""
+	}
+	return "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(b)
+}
+
+// resolveImageThumb ensures a JPEG thumb exists for an image item and returns a src for <img>.
+func (a *App) resolveImageThumb(projectID string, fileID int64, srcPath, thumbPath string) string {
+	if a.store == nil {
+		return ""
+	}
+	thumbDir := a.store.ThumbDir(projectID)
+	out := filepath.Join(thumbDir, fmt.Sprintf("%d.jpg", fileID))
+	candidates := []string{thumbPath, out}
+	for _, p := range candidates {
+		if p == "" {
+			continue
+		}
+		if _, err := os.Stat(p); err == nil {
+			if u := imageThumbSrc(p); u != "" {
+				return u
+			}
+			break
+		}
+	}
+	if mt, ok := discovery.Classify(srcPath); ok && mt == model.MediaImage {
+		if discovery.SupportsPHash(filepath.Ext(srcPath)) {
+			if err := imgutil.ThumbnailFromPath(srcPath, out, config.ThumbLongEdge); err == nil {
+				if u := imageThumbSrc(out); u != "" {
+					return u
+				}
+			}
+		}
+	}
+	return ""
+}
+
 func (a *App) ListGroups(projectID string, filter GroupFilter) ([]GroupListDTO, error) {
 	c, err := a.openProjectCache(projectID)
 	if err != nil {
@@ -700,8 +746,10 @@ func (a *App) ListGroups(projectID string, filter GroupFilter) ([]GroupListDTO, 
 					hasText = true
 				}
 			}
-			if cover == "" && it.ThumbPath != "" {
-				cover = a.mediaURLFromPath(it.ThumbPath)
+			if cover == "" && hasImage {
+				if mt, ok := discovery.Classify(it.Path); ok && mt == model.MediaImage {
+					cover = a.resolveImageThumb(projectID, it.FileID, it.Path, it.ThumbPath)
+				}
 			}
 		}
 		// Pure video/txt groups use icon placeholders; mixed groups keep image covers when present.
@@ -786,14 +834,14 @@ func (a *App) GetGroup(projectID string, groupID int64) (GroupDetailDTO, error) 
 	}
 	for _, it := range g.Items {
 		item := ItemDTO{
-			FileID:        it.FileID,
-			Path:          it.Path,
-			Action:        string(it.Action),
-			Similarity:    it.Similarity,
-			QualityScore:  it.QualityScore,
-			SizeBytes:     it.SizeBytes,
-			// Only expose real thumb paths; missing thumbs stay empty so the UI can show a placeholder.
-			ThumbURL:      a.mediaURLFromPath(it.ThumbPath),
+			FileID:       it.FileID,
+			Path:         it.Path,
+			Action:       string(it.Action),
+			Similarity:   it.Similarity,
+			QualityScore: it.QualityScore,
+			SizeBytes:    it.SizeBytes,
+			// Prefer inline JPEG data URLs so image thumbs always render in the Wails WebView.
+			ThumbURL:      a.resolveImageThumb(projectID, it.FileID, it.Path, it.ThumbPath),
 			IsRecommended: it.FileID == g.RecommendedFileID,
 			Reasons:       it.Reasons,
 		}
