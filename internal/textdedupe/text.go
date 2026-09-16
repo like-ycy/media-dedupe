@@ -26,6 +26,8 @@ const (
 	featureWindow = 7
 	maxFeatures   = 8192
 	maxBucketSize = 256
+	minHashBands  = 8
+	minHashRows   = 2
 )
 
 type Fact struct {
@@ -310,7 +312,7 @@ func fnv64(value string) uint64 {
 
 func candidatePairs(facts []Fact) [][2]int {
 	seen := make(map[[2]int]struct{})
-	byFeature := make(map[uint64][]int)
+	byBand := make(map[[3]uint64][]int)
 	byNameToken := make(map[string][]int)
 	add := func(a, b int) {
 		if a == b {
@@ -330,20 +332,19 @@ func candidatePairs(facts []Fact) [][2]int {
 		return bucket
 	}
 	for i, fact := range facts {
-		indexed := fact.Features
-		if len(indexed) > 64 {
-			indexed = indexed[:64]
-		}
-		for _, feature := range indexed {
-			bucket := byFeature[feature]
-			byFeature[feature] = addToBucket(bucket, i)
+		if len(fact.Features) > 0 {
+			for band, signature := range minHashSignature(fact.Features) {
+				key := [3]uint64{uint64(band), signature[0], signature[1]}
+				bucket := byBand[key]
+				byBand[key] = addToBucket(bucket, i)
+			}
 		}
 		for _, token := range strings.Fields(fact.Name) {
 			bucket := byNameToken[token]
 			byNameToken[token] = addToBucket(bucket, i)
 		}
 	}
-	for _, bucket := range byFeature {
+	for _, bucket := range byBand {
 		for i := 0; i < len(bucket); i++ {
 			for j := i + 1; j < len(bucket); j++ {
 				add(bucket[i], bucket[j])
@@ -362,6 +363,34 @@ func candidatePairs(facts []Fact) [][2]int {
 		pairs = append(pairs, pair)
 	}
 	return pairs
+}
+
+func minHashSignature(features []uint64) [minHashBands][minHashRows]uint64 {
+	var signature [minHashBands][minHashRows]uint64
+	if len(features) == 0 {
+		return signature
+	}
+	for band := range signature {
+		for row := range signature[band] {
+			signature[band][row] = ^uint64(0)
+		}
+	}
+	for _, feature := range features {
+		for index := 0; index < minHashBands*minHashRows; index++ {
+			value := mix64(feature + uint64(index)*0x9e3779b97f4a7c15)
+			band, row := index/minHashRows, index%minHashRows
+			if value < signature[band][row] {
+				signature[band][row] = value
+			}
+		}
+	}
+	return signature
+}
+
+func mix64(value uint64) uint64 {
+	value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9
+	value = (value ^ (value >> 27)) * 0x94d049bb133111eb
+	return value ^ (value >> 31)
 }
 
 func lengthCandidate(a, b int) bool {

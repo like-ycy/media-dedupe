@@ -90,32 +90,41 @@ func aspectRatioClose(lw, lh, rw, rh int, tolerance float64) bool {
 	return diff <= tolerance
 }
 
-// VideoHashSimilarity compares frame hash lists using median similarity.
+// VideoHashSimilarity compares frame hash lists with a small temporal offset.
 func VideoHashSimilarity(left, right []string) float64 {
-	n := len(left)
-	if len(right) < n {
-		n = len(right)
-	}
-	if n == 0 {
+	if len(left) == 0 || len(right) == 0 {
 		return 0
 	}
-	sims := make([]float64, 0, n)
-	for i := 0; i < n; i++ {
-		s, err := hashfile.Similarity(left[i], right[i])
-		if err != nil {
-			continue
+	best := 0.0
+	for shift := -1; shift <= 1; shift++ {
+		sims := make([]float64, 0, minInt(len(left), len(right)))
+		for i, leftHash := range left {
+			j := i + shift
+			if j < 0 || j >= len(right) {
+				continue
+			}
+			similarity, err := hashfile.Similarity(leftHash, right[j])
+			if err == nil {
+				sims = append(sims, similarity)
+			}
 		}
-		sims = append(sims, s)
+		if similarity := median(sims); similarity > best {
+			best = similarity
+		}
 	}
-	if len(sims) == 0 {
+	return best
+}
+
+func median(values []float64) float64 {
+	if len(values) == 0 {
 		return 0
 	}
-	sort.Float64s(sims)
-	mid := len(sims) / 2
-	if len(sims)%2 == 0 {
-		return (sims[mid-1] + sims[mid]) / 2
+	sort.Float64s(values)
+	mid := len(values) / 2
+	if len(values)%2 == 0 {
+		return (values[mid-1] + values[mid]) / 2
 	}
-	return sims[mid]
+	return values[mid]
 }
 
 // EdgeKey normalizes pair key.

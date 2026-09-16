@@ -169,18 +169,13 @@ func ComputeFrameHashes(path string, meta model.VideoMetadata, frameCount int, f
 	if meta.DurationMs <= 0 {
 		return nil, fmt.Errorf("invalid duration")
 	}
-	timestamps := BuildFrameTimestamps(meta.DurationMs, frameCount)
+	framePaths, err := ExtractFrames(path, meta, frameCount, tmpDir)
+	if err != nil {
+		return nil, err
+	}
 	var hashes []string
 	failed := 0
-	for i, ts := range timestamps {
-		framePath := filepath.Join(tmpDir, fmt.Sprintf("frame-%d.jpg", i))
-		if err := ExtractFrame(path, ts, framePath); err != nil {
-			failed++
-			if failed >= failureLimit {
-				break
-			}
-			continue
-		}
+	for _, framePath := range framePaths {
 		img, err := imgutil.LoadImage(framePath)
 		if err != nil {
 			failed++
@@ -209,6 +204,43 @@ func ComputeFrameHashes(path string, meta model.VideoMetadata, frameCount int, f
 		return nil, fmt.Errorf("no usable frames extracted")
 	}
 	return hashes, nil
+}
+
+// ExtractFrames writes evenly spaced JPEG frames with one FFmpeg process.
+func ExtractFrames(path string, meta model.VideoMetadata, frameCount int, tmpDir string) ([]string, error) {
+	if meta.DurationMs <= 0 || frameCount <= 0 {
+		return nil, fmt.Errorf("invalid frame extraction parameters")
+	}
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return nil, err
+	}
+	timestamps := BuildFrameTimestamps(meta.DurationMs, frameCount)
+	if len(timestamps) == 0 {
+		return nil, fmt.Errorf("no frame timestamps")
+	}
+	args := []string{"-y", "-ss", fmt.Sprintf("%.3f", float64(timestamps[0])/1000), "-i", path}
+	if len(timestamps) > 1 {
+		span := float64(timestamps[len(timestamps)-1]-timestamps[0]) / 1000
+		fps := float64(len(timestamps)) / span
+		args = append(args, "-t", fmt.Sprintf("%.3f", span), "-vf", fmt.Sprintf("fps=%.6f", fps))
+	}
+	args = append(args, "-an", "-frames:v", strconv.Itoa(len(timestamps)), "-q:v", "2", filepath.Join(tmpDir, "frame-%03d.jpg"))
+	ctx, cancel := context.WithTimeout(context.Background(), config.FFmpegTimeoutSeconds*time.Second)
+	defer cancel()
+	if err := exec.CommandContext(ctx, "ffmpeg", args...).Run(); err != nil {
+		return nil, fmt.Errorf("extract frames: %w", err)
+	}
+	paths := make([]string, 0, len(timestamps))
+	for i := 1; i <= len(timestamps); i++ {
+		framePath := filepath.Join(tmpDir, fmt.Sprintf("frame-%03d.jpg", i))
+		if _, err := os.Stat(framePath); err == nil {
+			paths = append(paths, framePath)
+		}
+	}
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("no frames extracted")
+	}
+	return paths, nil
 }
 
 // ExtractThumbFrame extracts one mid frame and writes a thumbnail.
