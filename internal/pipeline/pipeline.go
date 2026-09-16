@@ -650,9 +650,8 @@ func imageSimilarityByExtension(facts []imageFacts, opts Options) []model.Report
 			PHash:  f.phash,
 		}
 	}
-	pairs := candidate.ExpandImageCandidates(items)
 	maxDist := candidate.MaxHammingDistance(opts.Threshold, 64)
-	pairs = candidate.FilterByPHash(items, pairs, maxDist)
+	pairs := candidate.ImageCandidatesByPHash(items, maxDist)
 
 	var edges []model.SimilarityEdge
 	edgeSim := map[[2]int64]float64{}
@@ -838,9 +837,6 @@ func videoSimilarityByExtension(facts []videoFacts, opts Options) []model.Report
 	var edges []model.SimilarityEdge
 	edgeSim := map[[2]int64]float64{}
 	for _, p := range pairs {
-		if !match.IsVideoMetadataCandidate(facts[p[0]].meta, facts[p[1]].meta) {
-			continue
-		}
 		sim := match.VideoHashSimilarity(facts[p[0]].hashes, facts[p[1]].hashes)
 		if sim < opts.Threshold {
 			continue

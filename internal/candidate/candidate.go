@@ -1,7 +1,9 @@
 package candidate
 
 import (
+	"math/bits"
 	"sort"
+	"strconv"
 
 	"media-dedupe/internal/hashfile"
 )
@@ -139,6 +141,154 @@ func FilterByPHash(items []ImageCandidateItem, pairs [][2]int, maxDistance int) 
 	return out
 }
 
+// ImageCandidatesByPHash combines the dimension-neighbor filter with a
+// Hamming-radius lookup, so rejected pairs never get materialized first.
+func ImageCandidatesByPHash(items []ImageCandidateItem, maxDistance int) [][2]int {
+	if len(items) < 2 {
+		return nil
+	}
+	if maxDistance < 0 {
+		maxDistance = 0
+	}
+	if maxDistance >= 64 {
+		return ExpandImageCandidates(items)
+	}
+
+	trees := make(map[[2]int]*phashTree)
+	missing := make([]int, 0)
+	for i, item := range items {
+		value, ok := parsePHash(item.PHash)
+		if !ok {
+			missing = append(missing, i)
+			continue
+		}
+		bw, bh := ImageBucketKey(item.Width, item.Height)
+		key := [2]int{bw, bh}
+		if trees[key] == nil {
+			trees[key] = &phashTree{}
+		}
+		trees[key].insert(value, i)
+	}
+
+	seen := make(map[[2]int]struct{})
+	pairs := make([][2]int, 0)
+	add := func(a, b int) {
+		if a == b {
+			return
+		}
+		if a > b {
+			a, b = b, a
+		}
+		key := [2]int{a, b}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		pairs = append(pairs, key)
+	}
+	for i, item := range items {
+		value, ok := parsePHash(item.PHash)
+		if !ok {
+			continue
+		}
+		bw, bh := ImageBucketKey(item.Width, item.Height)
+		for dw := -1; dw <= 1; dw++ {
+			for dh := -1; dh <= 1; dh++ {
+				tree := trees[[2]int{bw + dw*8, bh + dh*8}]
+				if tree == nil {
+					continue
+				}
+				for _, j := range tree.query(value, maxDistance) {
+					add(i, j)
+				}
+			}
+		}
+	}
+	if len(missing) > 0 {
+		for _, pair := range ExpandImageCandidates(items) {
+			if !containsIndex(missing, pair[0]) && !containsIndex(missing, pair[1]) {
+				continue
+			}
+			add(pair[0], pair[1])
+		}
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i][0] != pairs[j][0] {
+			return pairs[i][0] < pairs[j][0]
+		}
+		return pairs[i][1] < pairs[j][1]
+	})
+	return pairs
+}
+
+type phashTree struct {
+	value    uint64
+	indices  []int
+	children map[int]*phashTree
+}
+
+func (tree *phashTree) insert(value uint64, index int) {
+	if tree.children == nil && tree.indices == nil {
+		tree.value = value
+		tree.indices = []int{index}
+		return
+	}
+	distance := bits.OnesCount64(tree.value ^ value)
+	if distance == 0 {
+		tree.indices = append(tree.indices, index)
+		return
+	}
+	if tree.children == nil {
+		tree.children = make(map[int]*phashTree)
+	}
+	child := tree.children[distance]
+	if child == nil {
+		child = &phashTree{value: value, indices: []int{index}}
+		tree.children[distance] = child
+		return
+	}
+	child.insert(value, index)
+}
+
+func (tree *phashTree) query(value uint64, maxDistance int) []int {
+	if tree == nil {
+		return nil
+	}
+	result := make([]int, 0)
+	var visit func(*phashTree)
+	visit = func(node *phashTree) {
+		distance := bits.OnesCount64(node.value ^ value)
+		if distance <= maxDistance {
+			result = append(result, node.indices...)
+		}
+		if node.children == nil {
+			return
+		}
+		low, high := distance-maxDistance, distance+maxDistance
+		for edge, child := range node.children {
+			if edge >= low && edge <= high {
+				visit(child)
+			}
+		}
+	}
+	visit(tree)
+	return result
+}
+
+func parsePHash(value string) (uint64, bool) {
+	parsed, err := strconv.ParseUint(value, 16, 64)
+	return parsed, err == nil
+}
+
+func containsIndex(values []int, target int) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
 // MaxHammingDistance converts similarity threshold to max bit distance for 64-bit hash.
 func MaxHammingDistance(threshold float64, bitCount int) int {
 	if threshold < 0 {
@@ -155,14 +305,45 @@ func MaxHammingDistance(threshold float64, bitCount int) int {
 // VideoBucket groups video indices by duration/aspect for pairwise compare.
 func VideoBucket(durationsMs []int64, widths, heights []int) [][2]int {
 	n := len(durationsMs)
+	if len(widths) != n || len(heights) != n || n < 2 {
+		return nil
+	}
+	order := make([]int, n)
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(i, j int) bool {
+		left, right := order[i], order[j]
+		if durationsMs[left] != durationsMs[right] {
+			return durationsMs[left] < durationsMs[right]
+		}
+		return left < right
+	})
 	var pairs [][2]int
-	for i := 0; i < n; i++ {
-		for j := i + 1; j < n; j++ {
-			if durationClose(durationsMs[i], durationsMs[j]) && aspectClose(widths[i], heights[i], widths[j], heights[j]) {
-				pairs = append(pairs, [2]int{i, j})
+	for position, i := range order {
+		if durationsMs[i] <= 0 {
+			continue
+		}
+		for next := position + 1; next < n; next++ {
+			j := order[next]
+			if !durationClose(durationsMs[i], durationsMs[j]) {
+				break
+			}
+			if aspectClose(widths[i], heights[i], widths[j], heights[j]) {
+				pair := [2]int{i, j}
+				if pair[0] > pair[1] {
+					pair[0], pair[1] = pair[1], pair[0]
+				}
+				pairs = append(pairs, pair)
 			}
 		}
 	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i][0] != pairs[j][0] {
+			return pairs[i][0] < pairs[j][0]
+		}
+		return pairs[i][1] < pairs[j][1]
+	})
 	return pairs
 }
 
