@@ -46,3 +46,4 @@ Thumbs.db
 # Go workspace / vendor noise
 vendor/
 .serena/
+tests/
