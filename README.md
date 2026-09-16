@@ -48,6 +48,9 @@ wails build -platform windows/amd64 -o media-dedupe-app.exe
 ./bin/media-dedupe scan ./novels --format text --no-image --no-video --text-similarity 0.92 --text-workers 8
 ./bin/media-dedupe report --format html
 ./bin/media-dedupe cache info
+
+# 生成本地测试媒体（默认约 3000 个，输出到 ./testdata）
+go run ./scripts/generate_testdata.go
 ```
 
 | 参数 | 默认 | 说明 |
