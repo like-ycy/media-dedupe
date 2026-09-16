@@ -8,10 +8,10 @@ import (
 
 const (
 	DefaultSimilarityThreshold     = 0.80
-	DefaultWorkers                 = 2
+	DefaultWorkers                 = 1
 	DefaultVideoWorkers            = 1
 	DefaultFrameCount              = 8
-	DefaultTextWorkers             = 8
+	DefaultTextWorkers             = 2
 	DefaultTextSimilarityThreshold = 0.92
 	DefaultFrameFailureLimit       = 3
 	DefaultReviewDelta             = 0.02

@@ -105,9 +105,9 @@ func DefaultSettings() Settings {
 		DefaultIncludeVideos: true,
 		DefaultIncludeTexts:  true,
 		DefaultTextThreshold: 0.92,
-		DefaultTextWorkers:   8,
+		DefaultTextWorkers:   config.DefaultTextWorkers,
 		DefaultFrameCount:    8,
-		DefaultWorkers:       2,
+		DefaultWorkers:       config.DefaultWorkers,
 		DefaultVideoWorkers:  1,
 		DefaultDeleteMode:    "recycle",
 		AllowPermanentDelete: false,
@@ -261,7 +261,7 @@ func (s *Store) Create(in CreateInput) (Project, error) {
 		p.FrameCount = 8
 	}
 	if p.Workers < 1 {
-		p.Workers = 2
+		p.Workers = config.DefaultWorkers
 	}
 	if p.VideoWorkers < 1 {
 		p.VideoWorkers = 1
@@ -270,7 +270,7 @@ func (s *Store) Create(in CreateInput) (Project, error) {
 		p.TextThreshold = 0.92
 	}
 	if p.TextWorkers < 1 {
-		p.TextWorkers = 8
+		p.TextWorkers = config.DefaultTextWorkers
 	}
 	for _, path := range p.Paths {
 		_ = os.MkdirAll(s.ProjectDir(p.ID), 0o755)
@@ -405,7 +405,7 @@ func (s *Store) SaveSettings(st Settings) error {
 		st.DefaultFrameCount = 8
 	}
 	if st.DefaultWorkers < 1 {
-		st.DefaultWorkers = 2
+		st.DefaultWorkers = config.DefaultWorkers
 	}
 	if st.DefaultVideoWorkers < 1 {
 		st.DefaultVideoWorkers = 1
@@ -414,7 +414,7 @@ func (s *Store) SaveSettings(st Settings) error {
 		st.DefaultTextThreshold = 0.92
 	}
 	if st.DefaultTextWorkers < 1 {
-		st.DefaultTextWorkers = 8
+		st.DefaultTextWorkers = config.DefaultTextWorkers
 	}
 	if st.DefaultDeleteMode == "" {
 		st.DefaultDeleteMode = "recycle"

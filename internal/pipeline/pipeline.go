@@ -405,49 +405,57 @@ func exactPass(
 		sizeBuckets[key] = append(sizeBuckets[key], i)
 	}
 
+	// Schedule candidates in discovery order to retain directory locality on HDDs.
+	hashes := make([]string, len(files))
+	g := errgroup.Group{}
+	g.SetLimit(workers)
+	for idx, f := range files {
+		if ctx.Err() != nil {
+			break
+		}
+		key := exactBucketKey{size: f.SizeBytes, ext: strings.ToLower(f.Extension)}
+		if infos[idx].fileID == 0 || len(sizeBuckets[key]) < 2 {
+			continue
+		}
+		g.Go(func() error {
+			if ctx.Err() != nil {
+				return nil
+			}
+			f := files[idx]
+			fileID := infos[idx].fileID
+			if infos[idx].unchanged {
+				if h, ok, err := c.LoadFileHash(fileID); err == nil && ok {
+					hashes[idx] = h
+					return nil
+				}
+			}
+			h, err := hashfile.SHA256File(f.Path)
+			if err != nil {
+				recordErr(f.Path, "file_hash", err.Error())
+				return nil
+			}
+			_ = c.SaveFileHash(fileID, f.SizeBytes, h)
+			hashes[idx] = h
+			return nil
+		})
+	}
+	_ = g.Wait()
+
 	var groups []model.ReportGroup
 	for _, idxs := range sizeBuckets {
-		if err := ctx.Err(); err != nil {
+		if ctx.Err() != nil {
 			break
 		}
 		if len(idxs) < 2 {
 			continue
 		}
-		hashes := make([]string, len(idxs))
-		g := errgroup.Group{}
-		g.SetLimit(workers)
-		for j, idx := range idxs {
-			j, idx := j, idx
-			g.Go(func() error {
-				if ctx.Err() != nil {
-					return nil
-				}
-				f := files[idx]
-				fileID := infos[idx].fileID
-				if infos[idx].unchanged {
-					if h, ok, err := c.LoadFileHash(fileID); err == nil && ok {
-						hashes[j] = h
-						return nil
-					}
-				}
-				h, err := hashfile.SHA256File(f.Path)
-				if err != nil {
-					recordErr(f.Path, "file_hash", err.Error())
-					return nil
-				}
-				_ = c.SaveFileHash(fileID, f.SizeBytes, h)
-				hashes[j] = h
-				return nil
-			})
-		}
-		_ = g.Wait()
-
 		byHash := map[string][]int{}
-		for j, h := range hashes {
+		for _, idx := range idxs {
+			h := hashes[idx]
 			if h == "" {
 				continue
 			}
-			byHash[h] = append(byHash[h], idxs[j])
+			byHash[h] = append(byHash[h], idx)
 		}
 		for _, members := range byHash {
 			if len(members) < 2 {

@@ -38,8 +38,8 @@ function createMock() {
         updatedAt: new Date().toISOString(), paths: input.paths || [], recursive: true,
         threshold: input.threshold || 0.8, includeImages: input.includeImages !== false,
         includeVideos: input.includeVideos !== false, includeTexts: input.includeTexts !== false,
-        textThreshold: input.textThreshold || 0.92, textWorkers: input.textWorkers || 8, frameCount: input.frameCount || 8,
-        workers: input.workers || 2, videoWorkers: input.videoWorkers || 1,
+        textThreshold: input.textThreshold || 0.92, textWorkers: input.textWorkers || 2, frameCount: input.frameCount || 8,
+        workers: input.workers || 1, videoWorkers: input.videoWorkers || 1,
         enableThumbs: true, lastScanAt: null,
         lastSummary: { filesSeen: 0, groups: 0, reclaimableBytes: 0, exactGroups: 0, similarGroups: 0, pendingGroups: 0 },
         scanning: false, ffmpegReady: true,
@@ -62,8 +62,8 @@ function createMock() {
     SelectDirectory: async () => '',
     ListRecentDirs: async () => ['/tmp', '/Users/demo/Pictures'],
     GetSettings: async () => ({
-      defaultThreshold: 0.8, defaultIncludeVideos: true, defaultFrameCount: 8, defaultWorkers: 2,
-      defaultIncludeTexts: true, defaultTextThreshold: 0.92, defaultTextWorkers: 8,
+      defaultThreshold: 0.8, defaultIncludeVideos: true, defaultFrameCount: 8, defaultWorkers: 1,
+      defaultIncludeTexts: true, defaultTextThreshold: 0.92, defaultTextWorkers: 2,
       defaultVideoWorkers: 1, defaultDeleteMode: 'recycle', allowPermanentDelete: false,
       ffmpegPath: '', ffprobePath: '', ffmpegAvailable: true, ffprobeAvailable: true,
     }),
@@ -292,7 +292,7 @@ async function renderConfig() {
       </div>
       <div class="form-row"><label>图片/哈希并发</label><input type="number" id="cfgWorkers" min="1" max="16" value="${p.workers}" /></div>
       <div class="form-row"><label>视频抽帧并发</label><input type="number" id="cfgVWorkers" min="1" max="8" value="${p.videoWorkers}" /></div>
-      <div class="form-row"><label>TXT 并发</label><input type="number" id="cfgTextWorkers" min="1" max="16" value="${p.textWorkers || 8}" /></div>
+      <div class="form-row"><label>TXT 并发</label><input type="number" id="cfgTextWorkers" min="1" max="16" value="${p.textWorkers || 2}" /></div>
       <div class="check-row"><input type="checkbox" class="checkbox" id="cfgRecursive" ${p.recursive ? 'checked' : ''}/> 递归子目录</div>
       <div class="check-row"><input type="checkbox" class="checkbox" id="cfgThumbs" ${p.enableThumbs ? 'checked' : ''}/> 生成缩略图</div>
       ${!state.appInfo?.ffmpeg ? `<div class="warn-banner">未检测到 FFmpeg / ffprobe。视频阶段将跳过；图片 SHA-256 + pHash 仍可用。可在「全局设置」配置路径。</div>` : ''}
@@ -545,7 +545,7 @@ async function renderSettings() {
       <div class="form-row"><label>默认视频抽帧数</label><input type="number" id="setFrames" min="1" max="32" value="${s.defaultFrameCount}" /></div>
       <div class="form-row"><label>默认图片并发</label><input type="number" id="setWorkers" min="1" max="16" value="${s.defaultWorkers}" /></div>
       <div class="form-row"><label>默认视频并发</label><input type="number" id="setVWorkers" min="1" max="8" value="${s.defaultVideoWorkers}" /></div>
-      <div class="form-row"><label>默认 TXT 并发</label><input type="number" id="setTextWorkers" min="1" max="16" value="${s.defaultTextWorkers || 8}" /></div>
+      <div class="form-row"><label>默认 TXT 并发</label><input type="number" id="setTextWorkers" min="1" max="16" value="${s.defaultTextWorkers || 2}" /></div>
       <div class="check-row"><input type="checkbox" class="checkbox" id="setVideos" ${s.defaultIncludeVideos ? 'checked' : ''}/> 默认启用视频</div>
       <div class="check-row"><input type="checkbox" class="checkbox" id="setTexts" ${s.defaultIncludeTexts !== false ? 'checked' : ''}/> 默认启用 TXT</div>
       <div class="form-row"><label>默认 TXT 相似度</label><input type="number" id="setTextThreshold" min="0.8" max="0.99" step="0.01" value="${s.defaultTextThreshold || 0.92}" /></div>
@@ -705,9 +705,9 @@ function bindMain() {
       defaultIncludeVideos: $('#setVideos').checked,
       defaultIncludeTexts: $('#setTexts').checked,
       defaultTextThreshold: Number($('#setTextThreshold').value) || 0.92,
-      defaultTextWorkers: Number($('#setTextWorkers').value) || 8,
+      defaultTextWorkers: Number($('#setTextWorkers').value) || 2,
       defaultFrameCount: Number($('#setFrames').value) || 8,
-      defaultWorkers: Number($('#setWorkers').value) || 2,
+      defaultWorkers: Number($('#setWorkers').value) || 1,
       defaultVideoWorkers: Number($('#setVWorkers').value) || 1,
       defaultDeleteMode: $('#setDeleteMode').value,
       allowPermanentDelete: $('#setAllowPerm').checked,
@@ -739,9 +739,9 @@ async function saveConfig() {
     includeVideos: $('#cfgVideos').checked,
     includeTexts: $('#cfgTexts').checked,
     textThreshold: Number($('#cfgTextThreshold').value) || 0.92,
-    textWorkers: Number($('#cfgTextWorkers')?.value) || 8,
+    textWorkers: Number($('#cfgTextWorkers')?.value) || 2,
     frameCount: Number($('#cfgFrames').value) || 8,
-    workers: Number($('#cfgWorkers').value) || 2,
+    workers: Number($('#cfgWorkers').value) || 1,
     videoWorkers: Number($('#cfgVWorkers').value) || 1,
     recursive: $('#cfgRecursive').checked,
     enableThumbs: $('#cfgThumbs').checked,
@@ -817,9 +817,9 @@ async function openCreateProjectModal() {
         includeVideos: root.querySelector('#npVideos').checked,
         includeTexts: state.settings?.defaultIncludeTexts !== false,
         textThreshold: state.settings?.defaultTextThreshold || 0.92,
-        textWorkers: state.settings?.defaultTextWorkers || 8,
+        textWorkers: state.settings?.defaultTextWorkers || 2,
         frameCount: state.settings?.defaultFrameCount || 8,
-        workers: state.settings?.defaultWorkers || 2,
+        workers: state.settings?.defaultWorkers || 1,
         videoWorkers: state.settings?.defaultVideoWorkers || 1,
         enableThumbs: true,
       });
