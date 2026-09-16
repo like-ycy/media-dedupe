@@ -11,6 +11,14 @@ const state = {
   selected: new Set(),
   scanEvent: null,
   scanStatus: null,
+  update: {
+    info: null,
+    status: null, // null | prompt | downloading | downloaded | failed
+    progress: null,
+    error: '',
+    useProxy: true,
+    hasUpdateBadge: false,
+  },
 };
 
 // Wails bindings with browser fallback for preview.
@@ -82,6 +90,16 @@ function createMock() {
     CopyToClipboard: async (t) => { await navigator.clipboard.writeText(t); },
     GetThumbURL: async () => '',
     GetFrameURLs: async () => [],
+    CheckUpdate: async () => ({
+      hasUpdate: false, currentVersion: 'v1.0.0-dev', latestVersion: 'v1.0.0-dev',
+      releaseName: '', releaseNotes: '', releaseUrl: '', downloadUrl: '',
+      assetName: '', assetSize: 0, platform: 'preview',
+    }),
+    GetPendingUpdate: async () => null,
+    DownloadUpdate: async () => { throw new Error('预览模式不支持下载更新'); },
+    CancelUpdateDownload: async () => {},
+    ApplyUpdateAndRestart: async () => { throw new Error('预览模式不支持自动更新'); },
+    OpenURL: async () => {},
   };
 }
 
@@ -563,7 +581,209 @@ async function renderSettings() {
       <div class="form-row"><label>FFmpeg 路径（可选，空则用 PATH）</label><input type="text" id="setFFmpeg" value="${esc(s.ffmpegPath || '')}" placeholder="例如 /usr/local/bin/ffmpeg" /></div>
       <div class="form-row"><label>ffprobe 路径（可选）</label><input type="text" id="setFFprobe" value="${esc(s.ffprobePath || '')}" /></div>
       <div class="muted">应用数据目录：${esc(state.appInfo?.appData || '')}</div>
+    </div>
+    <div class="card about-card">
+      <h3>关于与更新</h3>
+      <div class="about-row"><span>当前版本</span><b id="aboutVersion">${esc(state.appInfo?.version || '—')}</b></div>
+      <div class="about-row" id="aboutLatestRow" hidden><span>最新版本</span><b id="aboutLatest"></b></div>
+      <div class="about-row"><span>运行平台</span><b>${esc(state.appInfo?.platform || '—')}</b></div>
+      <div class="muted" style="margin-top:8px">启动后会自动检查 GitHub Release；也可手动检查并下载更新包，应用将替换自身并重启。</div>
+      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn" id="btnCheckUpdate">检查更新</button>
+        <button class="btn btn-ghost" id="btnOpenReleases">打开发布页</button>
+      </div>
     </div>`;
+}
+
+function updateFootVersion() {
+  const el = document.getElementById('footVersion');
+  if (!el) return;
+  const ver = state.appInfo?.version || '—';
+  if (state.update.hasUpdateBadge) {
+    el.innerHTML = `${esc(ver)} <span class="update-dot" aria-hidden="true"></span>`;
+    el.title = `发现新版本 ${state.update.info?.latestVersion || ''}，点击查看详情`;
+  } else {
+    el.textContent = ver;
+    el.title = '点击检查更新';
+  }
+}
+
+function setAboutLatest(info) {
+  const row = document.getElementById('aboutLatestRow');
+  const b = document.getElementById('aboutLatest');
+  if (!row || !b) return;
+  if (info?.hasUpdate) {
+    row.hidden = false;
+    b.textContent = info.latestVersion || '—';
+  }
+}
+
+async function handleCheckUpdate(fromUser) {
+  try {
+    const info = await api.CheckUpdate();
+    if (!info) return;
+    state.update.info = info;
+    if (info.hasUpdate) {
+      state.update.hasUpdateBadge = true;
+      state.update.status = 'prompt';
+      state.update.error = '';
+      updateFootVersion();
+      setAboutLatest(info);
+      openUpdateModal();
+    } else {
+      state.update.hasUpdateBadge = false;
+      updateFootVersion();
+      if (fromUser) toast(`当前已是最新版本 (${info.currentVersion})`, 'ok');
+    }
+  } catch (e) {
+    if (fromUser) toast(String(e.message || e), 'error');
+  }
+}
+
+function openUpdateModal() {
+  const root = document.getElementById('modalRoot');
+  root.hidden = false;
+  renderUpdateModal();
+}
+
+function closeUpdateModal() {
+  if (state.update.status === 'downloading') return;
+  const root = document.getElementById('modalRoot');
+  root.hidden = true;
+  root.innerHTML = '';
+}
+
+function renderUpdateModal() {
+  const root = document.getElementById('modalRoot');
+  const u = state.update;
+  const info = u.info;
+  if (!info || u.status === null) {
+    root.hidden = true;
+    root.innerHTML = '';
+    return;
+  }
+
+  root.hidden = false;
+  let body = '';
+
+  if (u.status === 'prompt') {
+    body = `
+      <div class="update-head">
+        <div>
+          <h3 class="update-title">发现新版本</h3>
+          <p class="update-versions">当前版本 ${esc(info.currentVersion)} → <b>${esc(info.latestVersion)}</b></p>
+        </div>
+        ${info.assetSize > 0 ? `<span class="update-size">${fmtBytes(info.assetSize)}</span>` : ''}
+      </div>
+      ${info.releaseNotes ? `<span class="update-notes-label">更新说明</span><div class="update-notes">${esc(info.releaseNotes)}</div>` : `<p>${esc(info.releaseName || '新版本已发布。')}</p>`}
+      <label class="check-row"><input type="checkbox" class="checkbox" id="updProxy" ${u.useProxy ? 'checked' : ''}/> 使用国内加速代理下载（推荐国内用户勾选）</label>
+      <div class="update-footer">
+        <button type="button" class="link-btn" id="updManual">浏览器手动下载</button>
+        <div class="actions">
+          <button type="button" class="btn" id="updLater">暂不更新</button>
+          <button type="button" class="btn btn-primary" id="updStart">立即更新</button>
+        </div>
+      </div>`;
+  } else if (u.status === 'downloading') {
+    const p = u.progress;
+    const pct = p?.percent || 0;
+    body = `
+      <div class="update-head"><div>
+        <h3 class="update-title">正在下载更新</h3>
+        <p class="update-versions">${esc(info.latestVersion)} · ${esc(info.assetName || '')}</p>
+      </div></div>
+      <div class="progress-track"><div class="progress-fill" style="width:${pct.toFixed(1)}%"></div></div>
+      <div class="progress-meta">
+        <span>${p ? `${fmtBytes(p.downloaded)} / ${p.total > 0 ? fmtBytes(p.total) : '—'}` : '准备中…'}</span>
+        <span>${pct.toFixed(0)}%${p?.speed ? ` · ${fmtBytes(p.speed)}/s` : ''}</span>
+      </div>
+      <div class="update-footer">
+        <span></span>
+        <div class="actions"><button type="button" class="btn" id="updCancel">取消下载</button></div>
+      </div>`;
+  } else if (u.status === 'downloaded') {
+    body = `
+      <div class="update-head"><div>
+        <h3 class="update-title">更新已准备就绪</h3>
+        <p class="update-versions">新版本 ${esc(info.latestVersion)} 已下载完成</p>
+      </div></div>
+      <p>点击「立即重启并更新」后，程序将在后台自动完成文件替换并重新拉起。如正在扫描或处理文件，请先等待完成。</p>
+      <div class="update-footer">
+        <span></span>
+        <div class="actions">
+          <button type="button" class="btn" id="updLater">稍后重启</button>
+          <button type="button" class="btn btn-primary" id="updApply">立即重启并更新</button>
+        </div>
+      </div>`;
+  } else if (u.status === 'failed') {
+    body = `
+      <div class="update-head"><div>
+        <h3 class="update-title">更新失败</h3>
+        <p class="update-versions">${esc(info.latestVersion)}</p>
+      </div></div>
+      <div class="update-error">${esc(u.error || '未知错误')}</div>
+      <div class="update-footer">
+        <button type="button" class="link-btn" id="updManual">前往网页手动下载</button>
+        <div class="actions">
+          <button type="button" class="btn" id="updClose">关闭</button>
+          <button type="button" class="btn btn-primary" id="updRetry">重试</button>
+        </div>
+      </div>`;
+  }
+
+  root.innerHTML = `<div class="modal update-modal">${body}</div>`;
+
+  const proxyChk = root.querySelector('#updProxy');
+  if (proxyChk) proxyChk.onchange = () => { state.update.useProxy = proxyChk.checked; };
+  root.querySelector('#updLater')?.addEventListener('click', () => {
+    state.update.status = null;
+    closeUpdateModal();
+  });
+  root.querySelector('#updClose')?.addEventListener('click', () => {
+    state.update.status = null;
+    closeUpdateModal();
+  });
+  root.querySelector('#updManual')?.addEventListener('click', () => {
+    try { api.OpenURL(info.releaseUrl || info.downloadUrl || 'https://github.com/like-ycy/media-dedupe/releases'); } catch (e) { toast(String(e.message || e), 'error'); }
+  });
+  root.querySelector('#updStart')?.addEventListener('click', () => startUpdateDownload());
+  root.querySelector('#updRetry')?.addEventListener('click', () => startUpdateDownload());
+  root.querySelector('#updCancel')?.addEventListener('click', () => {
+    try { api.CancelUpdateDownload(); } catch (e) { /* ignore */ }
+  });
+  root.querySelector('#updApply')?.addEventListener('click', async () => {
+    try {
+      await api.ApplyUpdateAndRestart();
+      toast('正在应用更新并重启…', 'ok');
+    } catch (e) {
+      toast(String(e.message || e), 'error');
+    }
+  });
+}
+
+async function startUpdateDownload() {
+  state.update.status = 'downloading';
+  state.update.progress = null;
+  state.update.error = '';
+  renderUpdateModal();
+  try {
+    await api.DownloadUpdate(state.update.useProxy);
+  } catch (e) {
+    state.update.status = 'failed';
+    state.update.error = String(e.message || e);
+    renderUpdateModal();
+  }
+}
+
+function updateProgressView(p) {
+  state.update.progress = p;
+  if (state.update.status !== 'downloading') return;
+  renderUpdateModal();
+}
+
+function applyUpdateFrontendState() {
+  updateFootVersion();
+  setAboutLatest(state.update.info);
 }
 
 function bindMain() {
@@ -725,6 +945,13 @@ function bindMain() {
     }
     try { await api.SaveSettings(dto); state.settings = dto; toast('设置已保存', 'ok'); await navigate('settings'); } catch (e) { toast(String(e.message || e), 'error'); }
   });
+
+  // Software update
+  $('#btnCheckUpdate')?.addEventListener('click', () => handleCheckUpdate(true));
+  $('#btnOpenReleases')?.addEventListener('click', () => {
+    try { api.OpenURL('https://github.com/like-ycy/media-dedupe/releases'); } catch (e) { toast(String(e.message || e), 'error'); }
+  });
+  $('#footVersion')?.addEventListener('click', () => handleCheckUpdate(true));
 }
 
 async function saveConfig() {
@@ -1009,6 +1236,28 @@ async function boot() {
       if (state.view === 'progress') { document.getElementById('main').innerHTML = await renderProgress(); bindMain(); }
     });
     window.runtime.EventsOn('files:deleted', () => refreshProjects());
+    window.runtime.EventsOn('update:available', (info) => {
+      state.update.info = info;
+      state.update.hasUpdateBadge = true;
+      updateFootVersion();
+      applyUpdateFrontendState();
+      // 若用户已打开其他模态框则只标红点；空闲时弹出提示
+      const root = document.getElementById('modalRoot');
+      if (root.hidden) {
+        state.update.status = 'prompt';
+        openUpdateModal();
+      }
+    });
+    window.runtime.EventsOn('update:progress', (p) => updateProgressView(p));
+    window.runtime.EventsOn('update:done', () => {
+      state.update.status = 'downloaded';
+      renderUpdateModal();
+    });
+    window.runtime.EventsOn('update:failed', (payload) => {
+      state.update.status = 'failed';
+      state.update.error = payload?.message || String(payload || '下载失败');
+      renderUpdateModal();
+    });
   }
 
   state.appInfo = await api.AppReady();
@@ -1016,8 +1265,23 @@ async function boot() {
   document.getElementById('ffmpegStatus').textContent = state.appInfo.ffmpeg ? '已就绪' : '未安装';
   document.getElementById('deleteModeFoot').textContent = state.settings.defaultDeleteMode === 'permanent' ? '永久删除' : '回收站';
   document.getElementById('appDataPath').textContent = state.appInfo.appData || '';
+  updateFootVersion();
   await refreshProjects();
   await navigate('projects');
+
+  // 补取启动检查结果，避免事件早于前端监听而丢失
+  try {
+    const pending = await api.GetPendingUpdate();
+    if (pending?.hasUpdate && !state.update.info) {
+      state.update.info = pending;
+      state.update.hasUpdateBadge = true;
+      updateFootVersion();
+      if (document.getElementById('modalRoot').hidden) {
+        state.update.status = 'prompt';
+        openUpdateModal();
+      }
+    }
+  } catch { /* ignore */ }
 }
 
 boot().catch((e) => {
