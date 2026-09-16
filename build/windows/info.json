@@ -1,0 +1,15 @@
+{
+	"fixed": {
+		"file_version": "{{.Info.ProductVersion}}"
+	},
+	"info": {
+		"0000": {
+			"ProductVersion": "{{.Info.ProductVersion}}",
+			"CompanyName": "{{.Info.CompanyName}}",
+			"FileDescription": "文件去重助手",
+			"LegalCopyright": "{{.Info.Copyright}}",
+			"ProductName": "文件去重助手",
+			"Comments": "{{.Info.Comments}}"
+		}
+	}
+}

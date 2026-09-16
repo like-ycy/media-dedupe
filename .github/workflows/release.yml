@@ -9,78 +9,26 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
-    runs-on: ubuntu-24.04
+  build-app:
+    name: Build app ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - goos: darwin
             goarch: arm64
+            runner: macos-latest
             ext: ""
-            archive: tar.gz
           - goos: darwin
             goarch: amd64
+            runner: macos-latest
             ext: ""
-            archive: tar.gz
-          - goos: linux
-            goarch: arm64
-            ext: ""
-            archive: tar.gz
-          - goos: linux
-            goarch: amd64
-            ext: ""
-            archive: tar.gz
           - goos: windows
             goarch: amd64
+            runner: windows-latest
             ext: ".exe"
-            archive: zip
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Validate release tag
-        run: |
-          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-            echo "Release tag must match vMAJOR.MINOR.PATCH"
-            exit 1
-          }
-
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Build
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          BIN="media-dedupe${{ matrix.ext }}"
-          mkdir -p dist out
-          go build -trimpath -ldflags="-s -w" -o "dist/${BIN}" ./cmd/media-dedupe
-          cd dist
-          if [ "${{ matrix.archive }}" = "zip" ]; then
-            zip "../out/media-dedupe_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip" "${BIN}"
-          else
-            tar czf "../out/media-dedupe_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz" "${BIN}"
-          fi
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v5
-        with:
-          name: media-dedupe-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: out/*
-          if-no-files-found: error
-
-  build-app-windows:
-    name: Build Wails app windows/amd64
-    runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -108,29 +56,45 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           export PATH="$(go env GOPATH)/bin:$PATH"
-          wails build -platform windows/amd64 -o media-dedupe-app.exe
+          OUT="media-dedupe-app${{ matrix.ext }}"
+
+          # No -nsis: Windows ships as a single portable exe.
+          wails build -platform "${{ matrix.goos }}/${{ matrix.goarch }}" -o "${OUT%.*}"
+
           mkdir -p out
-          if [ -f "build/bin/media-dedupe-app.exe" ]; then
-            BIN="build/bin/media-dedupe-app.exe"
+
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            if [ -f "build/bin/${OUT}" ]; then
+              BIN="build/bin/${OUT}"
+            else
+              BIN="${OUT}"
+            fi
+            test -f "$BIN"
+            ls -la build/bin "$BIN" || true
+            # Windows runners have no zip(1); use PowerShell Compress-Archive
+            powershell.exe -NoProfile -Command \
+              "Compress-Archive -Force -Path '$BIN' -DestinationPath 'out/media-dedupe-app_${VERSION}_windows_${{ matrix.goarch }}.zip'"
           else
-            BIN="media-dedupe-app.exe"
+            APP="build/bin/media-dedupe-app.app"
+            if [ ! -d "$APP" ]; then
+              APP="build/bin/media-dedupe.app"
+            fi
+            test -d "$APP"
+            ls -la build/bin "$APP" || true
+            tar czf "out/media-dedupe-app_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz" \
+              -C build/bin "$(basename "$APP")"
           fi
-          test -f "$BIN"
-          ls -la build/bin "$BIN" || true
-          # Windows runners have no zip(1); use PowerShell Compress-Archive
-          powershell.exe -NoProfile -Command \
-            "Compress-Archive -Force -Path '$BIN' -DestinationPath 'out/media-dedupe-app_${VERSION}_windows_amd64.zip'"
 
       - name: Upload app artifact
         uses: actions/upload-artifact@v5
         with:
-          name: media-dedupe-app-windows-amd64
+          name: media-dedupe-app-${{ matrix.goos }}-${{ matrix.goarch }}
           path: out/*
           if-no-files-found: error
 
   release:
     name: Publish release
-    needs: [build, build-app-windows]
+    needs: [build-app]
     runs-on: ubuntu-24.04
     steps:
       - name: Download artifacts

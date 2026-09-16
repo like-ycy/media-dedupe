@@ -1,26 +1,22 @@
 # media-dedupe
 
-本机离线媒体去重工具：**CLI** + **Wails 桌面 App**。
+产品名：**文件去重助手**。本机离线去重工具：**Wails 桌面 App**。
 
 扫描目录中的图片/视频/TXT，找出精确重复（SHA-256）、视觉近似重复（pHash / FFmpeg 抽帧多帧 pHash）与正文近似重复，生成可人工审阅的结果。**不会自动删除任何文件**；App 中删除默认移入系统回收站。
 
 ## 构建
 
-### CLI
-
-```bash
-go build -ldflags="-s -w" -o bin/media-dedupe ./cmd/media-dedupe
-```
+产品只构建桌面 App，不再构建 CLI 工具。
 
 依赖：Go 1.22+。视频能力需要系统安装 `ffmpeg` / `ffprobe`。
 
-### 桌面 App（Wails v2）
+### 本机构建（macOS）
 
 ```bash
 # 安装/升级 Wails CLI（可选）
 # go install github.com/wailsapp/wails/v2/cmd/wails@latest
 
-# 生产构建（macOS 会产出 build/bin/media-dedupe.app）
+# 生产构建（本机架构；产出 build/bin/media-dedupe-app.app）
 wails build -o media-dedupe-app
 
 # 开发热重载
@@ -33,37 +29,23 @@ App 入口：
 
 前端静态资源：`frontend/dist/`（`index.html` + `app.css` + `app.js`），由 `frontend` 包 embed。
 
-### Windows 交叉编译示例
+### 发布构建（GitHub Actions）
+
+打 `v*` tag 后由 Actions 产出：
+
+| 平台 | 架构 | 产物 |
+|---|---|---|
+| macOS | arm64 / amd64 | `media-dedupe-app_*.tar.gz`（`.app`） |
+| Windows | amd64 | `media-dedupe-app_*.zip`（单文件 exe，无安装包） |
+
+Windows 为便携版：解压后双击 `media-dedupe-app.exe` 即可使用，不生成 NSIS 安装程序。
+
+### 生成本地测试媒体
 
 ```bash
-wails build -platform windows/amd64 -o media-dedupe-app.exe
-```
-
-## CLI 使用
-
-```bash
-./bin/media-dedupe doctor
-./bin/media-dedupe scan ~/Pictures ~/Movies
-./bin/media-dedupe scan ./testdata/sample --format text --no-video
-./bin/media-dedupe scan ./novels --format text --no-image --no-video --text-similarity 0.92 --text-workers 8
-./bin/media-dedupe report --format html
-./bin/media-dedupe cache info
-
-# 生成本地测试媒体（默认约 3000 个，输出到 ./testdata）
+# 默认约 3000 个，输出到 ./testdata
 go run ./scripts/generate_testdata.go
 ```
-
-| 参数 | 默认 | 说明 |
-|---|---|---|
-| `--similarity` | 0.80 | 相似阈值（pHash / 视频） |
-| `--workers` | 2 | 图片/hash 并发 |
-| `--video-workers` | 1 | 抽帧并发 |
-| `--frames` | 8 | 视频抽帧数 |
-| `--format` | html | `text` \| `json` \| `html` |
-| `--no-thumbs` | false | 跳过缩略图 |
-| `--no-text` | false | 跳过 TXT 文件 |
-| `--text-similarity` | 0.92 | TXT 正文相似阈值 |
-| `--text-workers` | 8 | TXT 读取/指纹并发数 |
 
 ## 桌面 App 使用
 
@@ -108,7 +90,6 @@ go run ./scripts/generate_testdata.go
 ```
 main.go               # Wails 桌面入口
 cmd/
-  media-dedupe/       # CLI 入口
   app/                # App 入口（与根 main 等价）
 frontend/
   dist/               # 内嵌前端（HTML/CSS/JS）
@@ -123,7 +104,7 @@ internal/
   pipeline/           # 扫描编排（context 取消 + 事件）
   cache/              # SQLite + 组状态/删除审计
   discovery/ hashfile/ imagehash/ video/
-  candidate/ match/ score/ report/ cli/ config/ model/
+  candidate/ match/ score/ report/ config/ model/
 ```
 
 ## 测试

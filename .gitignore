@@ -1,6 +1,6 @@
 # Build output
 bin/
-build/
+build/bin/
 /media-dedupe
 /media-dedupe.exe
 /media-dedupe-app
