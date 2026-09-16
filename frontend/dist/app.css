@@ -329,15 +329,19 @@ table.data tr.clickable:hover { background: #f8fafc; }
   background: #e2e8f0;
   border: 1px solid var(--line);
 }
-.thumb-txt {
+.thumb-icon {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #64748b;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
   background: #f8fafc;
+  padding: 6px;
+}
+.thumb-icon img {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
 }
 .frames { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 .frames img {

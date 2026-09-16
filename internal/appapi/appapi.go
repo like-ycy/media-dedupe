@@ -16,6 +16,7 @@ import (
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"media-dedupe/internal/cache"
+	"media-dedupe/internal/discovery"
 	"media-dedupe/internal/hashfile"
 	"media-dedupe/internal/mediastore"
 	"media-dedupe/internal/model"
@@ -112,6 +113,7 @@ type GroupListDTO struct {
 	ReclaimableBytes  int64   `json:"reclaimableBytes"`
 	CoverThumbURL     string  `json:"coverThumbUrl"`
 	TypeLabel         string  `json:"typeLabel"`
+	MediaKind         string  `json:"mediaKind"` // image | video | text | mixed
 }
 
 type ItemDTO struct {
@@ -683,16 +685,38 @@ func (a *App) ListGroups(projectID string, filter GroupFilter) ([]GroupListDTO, 
 		}
 		var reclaim int64
 		var cover string
+		var hasImage, hasVideo, hasText bool
 		for _, it := range g.Items {
 			if g.RecommendedFileID > 0 && it.FileID != g.RecommendedFileID {
 				reclaim += it.SizeBytes
+			}
+			if mt, ok := discovery.Classify(it.Path); ok {
+				switch mt {
+				case model.MediaImage:
+					hasImage = true
+				case model.MediaVideo:
+					hasVideo = true
+				case model.MediaText:
+					hasText = true
+				}
 			}
 			if cover == "" && it.ThumbPath != "" {
 				cover = a.mediaURLFromPath(it.ThumbPath)
 			}
 		}
-		// Do not invent a thumb URL for missing files — broken <img> looks blank.
-		// Text groups have no thumbs; frontend shows a TXT placeholder.
+		// Pure video/txt groups use icon placeholders; mixed groups keep image covers when present.
+		if !hasImage && (hasVideo || hasText) {
+			cover = ""
+		}
+		mediaKind := "mixed"
+		switch {
+		case hasImage && !hasVideo && !hasText:
+			mediaKind = "image"
+		case hasVideo && !hasImage && !hasText:
+			mediaKind = "video"
+		case hasText && !hasImage && !hasVideo:
+			mediaKind = "text"
+		}
 		out = append(out, GroupListDTO{
 			GroupID:           g.GroupID,
 			GroupType:         string(g.GroupType),
@@ -703,6 +727,7 @@ func (a *App) ListGroups(projectID string, filter GroupFilter) ([]GroupListDTO, 
 			ReclaimableBytes:  reclaim,
 			CoverThumbURL:     cover,
 			TypeLabel:         groupTypeLabel(string(g.GroupType)),
+			MediaKind:         mediaKind,
 		})
 	}
 	if filter.Offset > 0 {

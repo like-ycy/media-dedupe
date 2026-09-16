@@ -128,8 +128,11 @@ function typeLabel(t) {
   return ({ exact: '精确重复', similar_image: '视觉近似图片', similar_video: '视觉近似视频', similar_text: '文本近似重复' })[t] || t;
 }
 function thumbHTML(src, mediaType, groupType) {
-  if (mediaType === 'text' || groupType === 'similar_text') {
-    return `<div class="thumb thumb-txt" title="TXT 文本"><span>TXT</span></div>`;
+  if (mediaType === 'text' || mediaType === 'txt' || groupType === 'similar_text') {
+    return `<div class="thumb thumb-icon" title="TXT 文本"><img src="./assets/icon-txt.png" alt="TXT" /></div>`;
+  }
+  if (mediaType === 'video' || groupType === 'similar_video') {
+    return `<div class="thumb thumb-icon" title="视频"><img src="./assets/icon-video.png" alt="视频" /></div>`;
   }
   if (src) return `<img class="thumb" src="${esc(src)}" alt="" />`;
   return `<div class="thumb"></div>`;
@@ -422,7 +425,7 @@ async function renderResults() {
       <td>#${g.groupId}</td>
       <td>
         <div style="display:flex;gap:10px;align-items:center">
-          ${thumbHTML(g.coverThumbUrl, '', g.groupType)}
+          ${thumbHTML(g.coverThumbUrl, g.mediaKind, g.groupType)}
           <div>
             <b>${esc(g.typeLabel || typeLabel(g.groupType))}</b>
             <div class="muted mono">${g.memberCount} 个成员 · 置信度 ${g.confidence.toFixed(2)}</div>
