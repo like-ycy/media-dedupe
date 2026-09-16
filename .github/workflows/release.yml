@@ -65,9 +65,10 @@ jobs:
 
           # No -nsis: Windows ships as a single portable exe.
           # 注入版本号到 internal/version.Version，供更新检查使用。
+          # 传入完整文件名（含 .exe），避免 Wails 2.16 在 Windows 上省略扩展名。
           wails build -platform "${{ matrix.goos }}/${{ matrix.goarch }}" \
             -ldflags "-X media-dedupe/internal/version.Version=${VERSION}" \
-            -o "${OUT%.*}"
+            -o "${OUT}"
 
           mkdir -p out
 
