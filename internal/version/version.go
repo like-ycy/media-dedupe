@@ -6,14 +6,15 @@ import (
 )
 
 // Version 是当前软件的编译版本号。
-// CI 编译时通过 -ldflags "-X media-dedupe/internal/version.Version=x.y.z" 注入。
-var Version = "1.0.0"
+// 本地/CI 编译时通过 -ldflags "-X media-dedupe/internal/version.Version=x.y.z" 注入。
+// 未注入时回落到开发版本，避免本地构建误报为正式版。
+var Version = "0.0.0-dev"
 
 // GetVersion 返回当前版本号字符串（带 v 前缀，便于展示）。
 func GetVersion() string {
 	v := strings.TrimSpace(Version)
 	if v == "" {
-		v = "1.0.0"
+		v = "0.0.0-dev"
 	}
 	if !strings.HasPrefix(v, "v") {
 		return "v" + v

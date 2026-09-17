@@ -17,11 +17,22 @@
 # go install github.com/wailsapp/wails/v2/cmd/wails@latest
 
 # 生产构建（本机架构；产出 build/bin/media-dedupe-app.app）
+# 本地测试构建：版本默认为 0.0.0-dev，不会误报成正式版
 wails build -o media-dedupe-app
+
+# 若本机也要测“正式版本号”，从当前 Git tag 注入：
+wails build -o media-dedupe-app \
+  -ldflags "-X media-dedupe/internal/version.Version=$(git describe --tags --exact-match | sed 's/^v//')"
 
 # 开发热重载
 wails dev
 ```
+
+版本号规则：
+
+- `wails build` 本身不会读 Git tag 注入 Go 版本变量
+- 正式发布由 GitHub Actions 在打 `v*` tag 后构建，并通过 `-ldflags` 注入版本
+- 本地未注入时显示 `v0.0.0-dev`；需要模拟正式版时用上面的 `-ldflags` 命令
 
 App 入口：
 - 根目录 `main.go`（供 `wails build`）

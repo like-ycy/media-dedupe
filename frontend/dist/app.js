@@ -31,7 +31,7 @@ function createMock() {
   let nextId = 1;
   return {
     AppReady: async () => ({
-      version: '1.0.0-dev', ffmpeg: true, ffprobe: true, appData: '/tmp/media-dedupe',
+      version: '0.0.0-dev', ffmpeg: true, ffprobe: true, appData: '/tmp/media-dedupe',
       deleteMode: 'recycle', engine: 'SQLite + SHA-256 + pHash + TXT 指纹 + FFmpeg', platform: 'preview',
     }),
     ListProjects: async () => projects.slice(),
@@ -91,7 +91,7 @@ function createMock() {
     GetThumbURL: async () => '',
     GetFrameURLs: async () => [],
     CheckUpdate: async () => ({
-      hasUpdate: false, currentVersion: 'v1.0.0-dev', latestVersion: 'v1.0.0-dev',
+      hasUpdate: false, currentVersion: 'v0.0.0-dev', latestVersion: 'v0.0.0-dev',
       releaseName: '', releaseNotes: '', releaseUrl: '', downloadUrl: '',
       assetName: '', assetSize: 0, platform: 'preview',
     }),
