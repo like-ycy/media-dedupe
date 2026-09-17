@@ -4,11 +4,13 @@
 
 扫描目录中的图片/视频/TXT，找出精确重复（SHA-256）、视觉近似重复（pHash / FFmpeg 抽帧多帧 pHash）与正文近似重复，生成可人工审阅的结果。**不会自动删除任何文件**；App 中删除默认移入系统回收站。
 
+支持从 GitHub Releases 检查更新、下载并替换自身后重启。
+
 ## 构建
 
-产品只构建桌面 App，不再构建 CLI 工具。
+产品只构建桌面 App，不再发布 CLI 工具（仓库中仍保留 `cmd/media-dedupe` 与 `internal/cli` 便于本地调试）。
 
-依赖：Go 1.22+。视频能力需要系统安装 `ffmpeg` / `ffprobe`。
+依赖：Go 1.27+（见 `go.mod`）。视频能力需要系统安装 `ffmpeg` / `ffprobe`。
 
 ### 本机构建（macOS）
 
@@ -38,11 +40,11 @@ App 入口：
 - 根目录 `main.go`（供 `wails build`）
 - `cmd/app/main.go`（同逻辑入口）
 
-前端静态资源：`frontend/dist/`（`index.html` + `app.css` + `app.js`），由 `frontend` 包 embed。
+前端静态资源：`frontend/dist/`（`index.html` + `app.css` + `app.js` + `assets/`），由 `frontend` 包 embed。
 
 ### 发布构建（GitHub Actions）
 
-打 `v*` tag 后由 Actions 产出：
+打 `v*` tag 后由 Actions 产出，并附带 `SHA256SUMS.txt`：
 
 | 平台 | 架构 | 产物 |
 |---|---|---|
@@ -50,6 +52,8 @@ App 入口：
 | Windows | amd64 | `media-dedupe-app_{ver}_windows_amd64.tar.gz`（单文件 exe，无安装包） |
 
 Windows 为便携版：解压后双击 `media-dedupe-app.exe` 即可使用，不生成 NSIS 安装程序。
+
+Release tag 须匹配 `vMAJOR.MINOR.PATCH`。
 
 ### 生成本地测试媒体
 
@@ -67,6 +71,7 @@ go run ./scripts/generate_testdata.go
 5. 重复结果 → 打开组详情 → 勾选副本 → **移入系统回收站**（需确认）
 6. 可忽略组、标记已处理、导出 JSON/HTML/TXT 报告
 7. 全局设置：默认删除策略、是否允许永久删除（默认关闭）、FFmpeg 路径
+8. 关于与更新：启动后自动检查 GitHub Release；也可手动检查、下载（可选国内加速代理）并重启应用完成更新
 
 ### 安全约束
 
@@ -74,6 +79,12 @@ go run ./scripts/generate_testdata.go
 - 默认模式：系统回收站；永久删除需设置开关 + 弹窗勾选「无法恢复」
 - 永久删除失败不会静默降级路径之外的逻辑；回收站失败返回明确错误
 - 缩略图/帧条仅经本地 `127.0.0.1` mediastore 提供，不暴露任意磁盘路径给 WebView
+
+### 自动更新
+
+- 检查源：GitHub Releases（`like-ycy/media-dedupe`），按当前 OS/Arch 匹配 `media-dedupe-app_{ver}_{goos}_{goarch}.tar.gz`
+- 流程：检查 → 下载（进度回调，可选 `ghfast.top` 加速）→ 校验 → 替换自身并重启
+- 版本比较基于 `internal/version`；本地未注入 tag 时为 `v0.0.0-dev`，会提示有新版本
 
 ### App 数据目录
 
@@ -102,12 +113,13 @@ go run ./scripts/generate_testdata.go
 main.go               # Wails 桌面入口
 cmd/
   app/                # App 入口（与根 main 等价）
+  media-dedupe/       # 本地调试用 CLI 入口（不随 Release 发布）
 frontend/
-  dist/               # 内嵌前端（HTML/CSS/JS）
+  dist/               # 内嵌前端（HTML/CSS/JS + 图标）
   frontend.go         # embed FS
 internal/
   appapi/             # Wails 绑定面（唯一 API）
-  appmain/            # 启动编排
+  appmain/            # 启动编排（窗口 + 本地 mediastore）
   project/            # 多项目 CRUD + 设置
   ops/                # 回收站/永久删除/打开路径
   mediastore/         # 缩略图/帧本地服务
@@ -115,7 +127,11 @@ internal/
   pipeline/           # 扫描编排（context 取消 + 事件）
   cache/              # SQLite + 组状态/删除审计
   discovery/ hashfile/ imagehash/ video/
-  candidate/ match/ score/ report/ config/ model/
+  textdedupe/         # TXT 正文近似
+  candidate/ match/ score/ report/
+  config/ model/ version/ fsutil/
+  updater/            # GitHub Release 检查/下载/应用更新
+  cli/                # 本地调试 CLI 实现（不随 Release 发布）
 ```
 
 ## 测试
