@@ -47,3 +47,4 @@ Thumbs.db
 vendor/
 .serena/
 tests/
+**/*_test.go
