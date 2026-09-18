@@ -48,7 +48,7 @@ function createMock() {
         includeVideos: input.includeVideos !== false, includeTexts: input.includeTexts !== false,
         textThreshold: input.textThreshold || 0.92, textWorkers: input.textWorkers || 2, frameCount: input.frameCount || 8,
         workers: input.workers || 1, videoWorkers: input.videoWorkers || 1,
-        enableThumbs: true, lastScanAt: null,
+        enableThumbs: false, lastScanAt: null,
         lastSummary: { filesSeen: 0, groups: 0, reclaimableBytes: 0, exactGroups: 0, similarGroups: 0, pendingGroups: 0 },
         scanning: false, ffmpegReady: true,
       };
@@ -325,7 +325,7 @@ async function renderConfig() {
       <div class="form-row"><label>视频抽帧并发</label><input type="number" id="cfgVWorkers" min="1" max="8" value="${p.videoWorkers}" /></div>
       <div class="form-row"><label>TXT 并发</label><input type="number" id="cfgTextWorkers" min="1" max="16" value="${p.textWorkers || 2}" /></div>
       <div class="check-row"><input type="checkbox" class="checkbox" id="cfgRecursive" ${p.recursive ? 'checked' : ''}/> 递归子目录</div>
-      <div class="check-row"><input type="checkbox" class="checkbox" id="cfgThumbs" ${p.enableThumbs ? 'checked' : ''}/> 生成缩略图</div>
+      <div class="hint">图片按原图预览；视频/TXT 使用固定图标，不单独生成缩略图。</div>
       ${!state.appInfo?.ffmpeg ? `<div class="warn-banner">未检测到 FFmpeg / ffprobe。视频阶段将跳过；图片 SHA-256 + pHash 仍可用。可在「全局设置」配置路径。</div>` : ''}
     </div>`;
 }
@@ -981,7 +981,6 @@ async function saveConfig() {
     workers: Number($('#cfgWorkers').value) || 1,
     videoWorkers: Number($('#cfgVWorkers').value) || 1,
     recursive: $('#cfgRecursive').checked,
-    enableThumbs: $('#cfgThumbs').checked,
   };
   try {
     const updated = await api.UpdateProject(p.id, patch);
@@ -1058,9 +1057,7 @@ async function openCreateProjectModal() {
         frameCount: state.settings?.defaultFrameCount || 8,
         workers: state.settings?.defaultWorkers || 1,
         videoWorkers: state.settings?.defaultVideoWorkers || 1,
-        enableThumbs: true,
       });
-      // enableThumbs default true if false zero — force true for new projects when user didn't care
       state.currentProjectId = p.id;
       close();
       toast('项目已创建', 'ok');

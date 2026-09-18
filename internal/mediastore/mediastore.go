@@ -10,16 +10,21 @@ import (
 	"sync"
 )
 
-// Store serves thumbs/frames from project data dirs only.
-// Path traversal is rejected; only allowed roots can be served.
+// Store serves thumbs/frames from project data dirs, plus explicitly
+// allowed individual files (e.g. original image previews).
+// Path traversal is rejected; only allowed roots/files can be served.
 type Store struct {
 	mu    sync.RWMutex
 	roots map[string]struct{}
+	files map[string]struct{}
 	base  string // e.g. http://127.0.0.1:52341/media
 }
 
 func New() *Store {
-	return &Store{roots: map[string]struct{}{}}
+	return &Store{
+		roots: map[string]struct{}{},
+		files: map[string]struct{}{},
+	}
 }
 
 // SetBase sets absolute base URL prefix used when building media URLs.
@@ -44,6 +49,26 @@ func (s *Store) AllowRoot(dir string) error {
 	return nil
 }
 
+// AllowFile registers a single file path that may be served (no dir create).
+func (s *Store) AllowFile(path string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	abs = filepath.Clean(abs)
+	fi, err := os.Stat(abs)
+	if err != nil {
+		return err
+	}
+	if fi.IsDir() {
+		return ErrNotAllowed
+	}
+	s.mu.Lock()
+	s.files[abs] = struct{}{}
+	s.mu.Unlock()
+	return nil
+}
+
 func (s *Store) rootsSnapshot() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -56,6 +81,12 @@ func (s *Store) rootsSnapshot() []string {
 
 func (s *Store) resolve(abs string) bool {
 	abs = filepath.Clean(abs)
+	s.mu.RLock()
+	_, fileOK := s.files[abs]
+	s.mu.RUnlock()
+	if fileOK {
+		return true
+	}
 	for _, root := range s.rootsSnapshot() {
 		root = filepath.Clean(root)
 		if abs == root || strings.HasPrefix(abs, root+string(filepath.Separator)) {

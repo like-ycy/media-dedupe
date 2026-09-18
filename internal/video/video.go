@@ -44,6 +44,7 @@ func ProbeMetadata(path string) model.VideoMetadata {
 		"-show_streams",
 		path,
 	)
+	hideConsole(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		return model.VideoMetadata{IsReadable: false}
@@ -142,6 +143,7 @@ func ExtractFrame(path string, timestampMs int64, outPath string) error {
 		"-q:v", "2",
 		outPath,
 	)
+	hideConsole(cmd)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("extract frame: %w", err)
 	}
@@ -220,7 +222,9 @@ func ExtractFrames(path string, meta model.VideoMetadata, frameCount int, tmpDir
 	args = append(args, "-an", "-frames:v", strconv.Itoa(len(timestamps)), "-q:v", "2", filepath.Join(tmpDir, "frame-%03d.jpg"))
 	ctx, cancel := context.WithTimeout(context.Background(), config.FFmpegTimeoutSeconds*time.Second)
 	defer cancel()
-	if err := exec.CommandContext(ctx, ffmpegBin(), args...).Run(); err != nil {
+	fcmd := exec.CommandContext(ctx, ffmpegBin(), args...)
+	hideConsole(fcmd)
+	if err := fcmd.Run(); err != nil {
 		return nil, fmt.Errorf("extract frames: %w", err)
 	}
 	paths := make([]string, 0, len(timestamps))
@@ -234,25 +238,6 @@ func ExtractFrames(path string, meta model.VideoMetadata, frameCount int, tmpDir
 		return nil, fmt.Errorf("no frames extracted")
 	}
 	return paths, nil
-}
-
-// ExtractThumbFrame extracts one mid frame and writes a thumbnail.
-func ExtractThumbFrame(path string, meta model.VideoMetadata, outPath string, longEdge int) error {
-	ts := meta.DurationMs / 2
-	tmp, err := os.MkdirTemp("", "media-dedupe-thumb-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(tmp)
-	framePath := filepath.Join(tmp, "thumb.jpg")
-	if err := ExtractFrame(path, ts, framePath); err != nil {
-		return err
-	}
-	img, err := imgutil.LoadImage(framePath)
-	if err != nil {
-		return err
-	}
-	return imgutil.WriteThumb(img, outPath, longEdge)
 }
 
 func parseFrameRate(value string) *float64 {

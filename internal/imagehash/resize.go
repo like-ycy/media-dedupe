@@ -4,45 +4,8 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
-	"image/jpeg"
-	"io"
 	"math"
 )
-
-func encodeJPEG(w io.Writer, img image.Image) error {
-	return jpeg.Encode(w, img, &jpeg.Options{Quality: 80})
-}
-
-func resizeLongEdge(src image.Image, longEdge int) image.Image {
-	if longEdge <= 0 {
-		return src
-	}
-	b := src.Bounds()
-	w, h := b.Dx(), b.Dy()
-	if w <= 0 || h <= 0 {
-		return src
-	}
-	maxSide := w
-	if h > maxSide {
-		maxSide = h
-	}
-	if maxSide <= longEdge {
-		return src
-	}
-	scale := float64(longEdge) / float64(maxSide)
-	nw := int(math.Max(1, math.Round(float64(w)*scale)))
-	nh := int(math.Max(1, math.Round(float64(h)*scale)))
-	dst := image.NewRGBA(image.Rect(0, 0, nw, nh))
-	// Simple bilinear-ish nearest for thumbs (fast enough).
-	for y := 0; y < nh; y++ {
-		sy := b.Min.Y + y*h/nh
-		for x := 0; x < nw; x++ {
-			sx := b.Min.X + x*w/nw
-			dst.Set(x, y, src.At(sx, sy))
-		}
-	}
-	return dst
-}
 
 // MeanLuma returns average 0..255 luminance and variance-ish spread.
 func MeanLuma(img image.Image) (mean float64, stddev float64) {

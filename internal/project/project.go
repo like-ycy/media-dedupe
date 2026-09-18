@@ -249,9 +249,9 @@ func (s *Store) Create(in CreateInput) (Project, error) {
 		FrameCount:    in.FrameCount,
 		Workers:       in.Workers,
 		VideoWorkers:  in.VideoWorkers,
-		EnableThumbs:  true,
+		EnableThumbs:  true, // legacy field; scan no longer pre-generates thumbs
 	}
-	if !p.IncludeImages && !p.IncludeVideos {
+	if !p.IncludeImages && !p.IncludeVideos && !p.IncludeTexts {
 		p.IncludeImages = true
 	}
 	if p.Threshold <= 0 {

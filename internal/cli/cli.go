@@ -33,7 +33,6 @@ func NewRootCmd() *cobra.Command {
 		noVideo        bool
 		noText         bool
 		recursive      bool
-		noThumbs       bool
 		thumbDir       string
 	)
 
@@ -89,7 +88,6 @@ func NewRootCmd() *cobra.Command {
 				Workers:       workers,
 				VideoWorkers:  videoWorkers,
 				FrameCount:    frames,
-				EnableThumbs:  !noThumbs && format == "html",
 				OnProgress: func(msg string) {
 					fmt.Fprintln(os.Stderr, "[media-dedupe]", msg)
 				},
@@ -143,7 +141,6 @@ func NewRootCmd() *cobra.Command {
 	scan.Flags().BoolVar(&noVideo, "no-video", false, "skip videos")
 	scan.Flags().BoolVar(&noText, "no-text", false, "skip txt files")
 	scan.Flags().BoolVar(&recursive, "recursive", true, "recurse into subdirectories")
-	scan.Flags().BoolVar(&noThumbs, "no-thumbs", false, "skip thumbnail generation")
 	scan.Flags().StringVar(&thumbDir, "thumb-dir", "", "thumbnail directory (default cache dir/thumbs)")
 
 	reportCmd := &cobra.Command{

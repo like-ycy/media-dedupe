@@ -16,7 +16,7 @@ type FailedItem struct {
 }
 
 type Request struct {
-	Mode     string  `json:"mode"` // recycle | permanent
+	Mode     string   `json:"mode"` // recycle | permanent
 	Paths    []string `json:"paths"`
 	GroupIDs []int64  `json:"groupIds"`
 }

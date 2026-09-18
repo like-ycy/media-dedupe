@@ -17,7 +17,6 @@ const (
 	DefaultReviewDelta             = 0.02
 	MaxImagePixels                 = 100_000_000
 	FFmpegTimeoutSeconds           = 30
-	ThumbLongEdge                  = 480
 )
 
 var ImageExtensions = map[string]struct{}{

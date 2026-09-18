@@ -17,10 +17,8 @@ import (
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"media-dedupe/internal/cache"
-	"media-dedupe/internal/config"
 	"media-dedupe/internal/discovery"
 	"media-dedupe/internal/hashfile"
-	imgutil "media-dedupe/internal/imagehash"
 	"media-dedupe/internal/mediastore"
 	"media-dedupe/internal/model"
 	"media-dedupe/internal/ops"
@@ -337,9 +335,8 @@ func (a *App) CreateProject(input project.CreateInput) (ProjectDTO, error) {
 	if input.TextWorkers <= 0 {
 		input.TextWorkers = st.DefaultTextWorkers
 	}
-	// EnableThumbs defaults true when omitted zero-value is false;
-	// callers should set true explicitly; for create we honor input.
-	if !input.EnableThumbs && !input.IncludeImages && !input.IncludeVideos {
+	// Default to images when nothing is selected.
+	if !input.IncludeImages && !input.IncludeVideos && !input.IncludeTexts {
 		input.IncludeImages = true
 	}
 	p, err := a.store.Create(input)
@@ -530,7 +527,6 @@ func (a *App) runScan(ctx context.Context, p project.Project, st *scanState) {
 		Workers:       p.Workers,
 		VideoWorkers:  p.VideoWorkers,
 		FrameCount:    p.FrameCount,
-		EnableThumbs:  p.EnableThumbs,
 		Ctx:           ctx,
 		ProjectID:     p.ID,
 		OnEvent: func(ev progress.Event) {
@@ -658,33 +654,31 @@ func imageThumbSrc(path string) string {
 	return "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(b)
 }
 
-// resolveImageThumb ensures a JPEG thumb exists for an image item and returns a src for <img>.
+// resolveImageThumb returns a preview src for an image item without generating a thumb.
+// Preview is the original file via mediastore (Explorer-style), like the file manager.
+// Video/text return empty so the UI can show fixed icons.
 func (a *App) resolveImageThumb(projectID string, fileID int64, srcPath, thumbPath string) string {
-	if a.store == nil {
+	if a.media == nil {
 		return ""
 	}
-	thumbDir := a.store.ThumbDir(projectID)
-	out := filepath.Join(thumbDir, fmt.Sprintf("%d.jpg", fileID))
-	candidates := []string{thumbPath, out}
-	for _, p := range candidates {
-		if p == "" {
-			continue
-		}
-		if _, err := os.Stat(p); err == nil {
-			if u := imageThumbSrc(p); u != "" {
-				return u
-			}
-			break
+	if mt, ok := discovery.Classify(srcPath); !ok || mt != model.MediaImage {
+		return ""
+	}
+	if err := a.media.AllowFile(srcPath); err != nil {
+		return ""
+	}
+	if u := a.media.URL(srcPath); u != "" {
+		return u
+	}
+	// Fallback: legacy thumb file from older scans, then small data URL.
+	if thumbPath != "" {
+		if u := imageThumbSrc(thumbPath); u != "" {
+			return u
 		}
 	}
-	if mt, ok := discovery.Classify(srcPath); ok && mt == model.MediaImage {
-		if discovery.SupportsPHash(filepath.Ext(srcPath)) {
-			if err := imgutil.ThumbnailFromPath(srcPath, out, config.ThumbLongEdge); err == nil {
-				if u := imageThumbSrc(out); u != "" {
-					return u
-				}
-			}
-		}
+	if a.store != nil {
+		out := filepath.Join(a.store.ThumbDir(projectID), fmt.Sprintf("%d.jpg", fileID))
+		return imageThumbSrc(out)
 	}
 	return ""
 }

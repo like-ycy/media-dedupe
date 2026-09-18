@@ -43,7 +43,6 @@ type Options struct {
 	Workers       int
 	VideoWorkers  int
 	FrameCount    int
-	EnableThumbs  bool
 	OnProgress    func(msg string)
 	Ctx           context.Context
 	OnEvent       func(ev progress.Event)
@@ -314,11 +313,8 @@ func Scan(opts Options) (*Result, error) {
 		groups = append(groups, g)
 	}
 
-	if opts.EnableThumbs && opts.ThumbDir != "" {
-		emit(progress.Event{Stage: progress.StageThumb, Phase: "running", Message: "生成缩略图...", Percent: 90, FilesSeen: len(files), FoundExact: exactCount, FoundSimilar: similarCount, ProjectID: opts.ProjectID})
-		progressFn("generating thumbnails...")
-		attachThumbs(groups, files, infos, opts)
-	}
+	// Do not pre-generate JPEG thumbs: the UI previews original images
+	// (Explorer-style) and uses fixed icons for video/text.
 
 	if opts.FrameDir != "" {
 		saveFramePreviews(c, opts.FrameDir)
@@ -972,50 +968,4 @@ func itemSimilarity(id int64, comp []int64, edgeSim map[[2]int64]float64) float6
 		return 1.0
 	}
 	return best
-}
-
-func attachThumbs(
-	groups []model.ReportGroup,
-	files []model.DiscoveredFile,
-	infos []fileCacheInfo,
-	opts Options,
-) {
-	byID := map[int64]model.DiscoveredFile{}
-	for i, f := range files {
-		if infos[i].fileID != 0 {
-			byID[infos[i].fileID] = f
-		}
-	}
-	_ = os.MkdirAll(opts.ThumbDir, 0o755)
-
-	for gi := range groups {
-		for ii := range groups[gi].Items {
-			item := &groups[gi].Items[ii]
-			f, ok := byID[item.FileID]
-			if !ok {
-				continue
-			}
-			out := filepath.Join(opts.ThumbDir, fmt.Sprintf("%d.jpg", item.FileID))
-			if _, err := os.Stat(out); err == nil {
-				item.ThumbPath = out
-				continue
-			}
-			var err error
-			if f.MediaType == model.MediaImage {
-				if !discovery.SupportsPHash(f.Extension) {
-					continue
-				}
-				err = imgutil.ThumbnailFromPath(f.Path, out, config.ThumbLongEdge)
-			} else {
-				meta := video.ProbeMetadata(f.Path)
-				if !meta.IsReadable {
-					continue
-				}
-				err = video.ExtractThumbFrame(f.Path, meta, out, config.ThumbLongEdge)
-			}
-			if err == nil {
-				item.ThumbPath = out
-			}
-		}
-	}
 }

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"media-dedupe/internal/config"
 	"media-dedupe/internal/model"
 )
 
@@ -180,18 +181,7 @@ h1 { font-size:22px; margin:0 0 8px; }
 			html.EscapeString(string(g.GroupType)), html.EscapeString(string(g.GroupType)),
 			g.Confidence)
 		for _, it := range g.Items {
-			thumb := ""
-			if it.ThumbPath != "" {
-				src := it.ThumbPath
-				if thumbRel != "" {
-					if rel, err := filepath.Rel(thumbRel, it.ThumbPath); err == nil {
-						src = rel
-					}
-				}
-				thumb = fmt.Sprintf(`<img loading="lazy" src="%s" alt="">`, html.EscapeString(filepath.ToSlash(src)))
-			} else {
-				thumb = `<div class="muted" style="aspect-ratio:4/3;display:flex;align-items:center;justify-content:center">无预览</div>`
-			}
+			thumb := previewHTML(it.Path, it.ThumbPath, thumbRel)
 			fmt.Fprintf(&b, `<div class="item">%s<div class="meta">
 <div class="action %s">%s</div>
 <div class="scores">sim=%.2f · quality=%.2f · %s</div>
@@ -219,6 +209,30 @@ h1 { font-size:22px; margin:0 0 8px; }
 
 	b.WriteString(`</body></html>`)
 	return b.String()
+}
+
+// previewHTML shows a legacy thumb when present, otherwise the original
+// image path (Explorer-style local preview). Non-images get a placeholder.
+func previewHTML(srcPath, thumbPath, thumbRel string) string {
+	if thumbPath != "" {
+		src := thumbPath
+		if thumbRel != "" {
+			if rel, err := filepath.Rel(thumbRel, thumbPath); err == nil {
+				src = rel
+			}
+		}
+		return fmt.Sprintf(`<img loading="lazy" src="%s" alt="">`, html.EscapeString(filepath.ToSlash(src)))
+	}
+	if isImagePath(srcPath) {
+		return fmt.Sprintf(`<img loading="lazy" src="%s" alt="">`, html.EscapeString(filepath.ToSlash(srcPath)))
+	}
+	return `<div class="muted" style="aspect-ratio:4/3;display:flex;align-items:center;justify-content:center">无预览</div>`
+}
+
+func isImagePath(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	_, ok := config.ImageExtensions[ext]
+	return ok
 }
 
 // WriteFile writes content to path, creating parent dirs.

@@ -82,27 +82,3 @@ func ComputePHashFromFile(path string) (string, error) {
 	}
 	return PerceptualHash(img)
 }
-
-// WriteThumb writes a long-edge thumbnail as JPEG.
-func WriteThumb(img image.Image, outPath string, longEdge int) error {
-	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
-		return err
-	}
-	thumb := resizeLongEdge(img, longEdge)
-	out, err := os.Create(outPath)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	// JPEG keeps thumbs small and is widely supported in HTML.
-	return encodeJPEG(out, thumb)
-}
-
-// ThumbnailFromPath writes a thumbnail for a source image path.
-func ThumbnailFromPath(srcPath, outPath string, longEdge int) error {
-	img, err := LoadImage(srcPath)
-	if err != nil {
-		return err
-	}
-	return WriteThumb(img, outPath, longEdge)
-}
