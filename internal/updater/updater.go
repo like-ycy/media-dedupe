@@ -158,9 +158,9 @@ func (m *Manager) LatestInfo() *UpdateInfo {
 }
 
 // matchAsset 匹配当前系统平台与架构对应的资产。
-// 命名约定（与 release.yml 一致）：media-dedupe-app_{ver}_{goos}_{goarch}.tar.gz
+// 命名约定（与 release.yml 一致）：media-dedupe-app_{ver}_{goos}_{goarch}.zip
 func matchAsset(assets []ReleaseAsset, goos, goarch string) *ReleaseAsset {
-	wantSuffix := "_" + goos + "_" + goarch + ".tar.gz"
+	wantSuffix := "_" + goos + "_" + goarch + ".zip"
 	for i := range assets {
 		name := strings.ToLower(assets[i].Name)
 		if strings.HasPrefix(name, "media-dedupe-app_") && strings.HasSuffix(name, wantSuffix) {
@@ -199,7 +199,7 @@ func (m *Manager) StartDownload(useProxy bool, onProgress func(DownloadProgress)
 		m.mu.Unlock()
 		return fmt.Errorf("更新包文件名无效")
 	}
-	if !strings.HasSuffix(strings.ToLower(assetName), ".tar.gz") {
+	if !strings.HasSuffix(strings.ToLower(assetName), ".zip") {
 		m.mu.Unlock()
 		return fmt.Errorf("更新包格式不受支持: %s", assetName)
 	}

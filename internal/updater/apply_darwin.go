@@ -12,7 +12,7 @@ import (
 	"syscall"
 )
 
-// ApplyAndRestart 在 macOS 上解压 tar.gz，替换当前 .app 应用程序包并重启。
+// ApplyAndRestart 在 macOS 上解压 zip，替换当前 .app 应用程序包并重启。
 func (m *Manager) ApplyAndRestart() error {
 	pkgPath, tempDir, err := m.GetDownloadedFile()
 	if err != nil {
@@ -29,7 +29,7 @@ func (m *Manager) ApplyAndRestart() error {
 		return fmt.Errorf("创建解压目录失败: %w", err)
 	}
 
-	if err := extractTarGz(pkgPath, extractedDir); err != nil {
+	if err := extractZip(pkgPath, extractedDir); err != nil {
 		return fmt.Errorf("解压更新包失败: %w", err)
 	}
 

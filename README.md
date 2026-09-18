@@ -48,8 +48,8 @@ App 入口：
 
 | 平台 | 架构 | 产物 |
 |---|---|---|
-| macOS | arm64 / amd64 | `media-dedupe-app_{ver}_darwin_{arch}.tar.gz`（`.app`） |
-| Windows | amd64 | `media-dedupe-app_{ver}_windows_amd64.tar.gz`（单文件 exe，无安装包） |
+| macOS | arm64 / amd64 | `media-dedupe-app_{ver}_darwin_{arch}.zip`（`.app`） |
+| Windows | amd64 | `media-dedupe-app_{ver}_windows_amd64.zip`（单文件 exe，无安装包） |
 
 Windows 为便携版：解压后双击 `media-dedupe-app.exe` 即可使用，不生成 NSIS 安装程序。
 
@@ -82,7 +82,7 @@ go run ./scripts/generate_testdata.go
 
 ### 自动更新
 
-- 检查源：GitHub Releases（`like-ycy/media-dedupe`），按当前 OS/Arch 匹配 `media-dedupe-app_{ver}_{goos}_{goarch}.tar.gz`
+- 检查源：GitHub Releases（`like-ycy/media-dedupe`），按当前 OS/Arch 匹配 `media-dedupe-app_{ver}_{goos}_{goarch}.zip`
 - 流程：检查 → 下载（进度回调，可选 `ghfast.top` 加速）→ 校验 → 替换自身并重启
 - 版本比较基于 `internal/version`；本地未注入 tag 时为 `v0.0.0-dev`，会提示有新版本
 

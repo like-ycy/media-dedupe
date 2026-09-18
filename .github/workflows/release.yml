@@ -103,7 +103,7 @@ jobs:
             -o "${OUT}"
 
           mkdir -p out
-          ASSET="media-dedupe-app_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
+          ASSET="media-dedupe-app_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
 
           if [ "${{ matrix.goos }}" = "windows" ]; then
             if [ -f "build/bin/${OUT}" ]; then
@@ -113,7 +113,17 @@ jobs:
             fi
             test -f "$BIN"
             ls -la build/bin "$BIN" || true
-            tar czf "out/${ASSET}" -C "$(dirname "$BIN")" "$(basename "$BIN")"
+            # Windows runner 可能没有 Info-ZIP，统一用 Python zipfile 打单文件包
+            "$PYTHON_BIN" - "$BIN" "out/${ASSET}" <<'PY'
+          import sys
+          import zipfile
+          from pathlib import Path
+
+          bin_path = Path(sys.argv[1])
+          out_path = Path(sys.argv[2])
+          with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+              zf.write(bin_path, bin_path.name)
+          PY
           else
             APP="build/bin/media-dedupe-app.app"
             if [ ! -d "$APP" ]; then
@@ -121,8 +131,9 @@ jobs:
             fi
             test -d "$APP"
             ls -la build/bin "$APP" || true
-            tar czf "out/${ASSET}" \
-              -C build/bin "$(basename "$APP")"
+            # -y 保留 .app 内符号链接，-X 不写入 macOS 扩展属性
+            OUT_ABS="$(cd out && pwd)/${ASSET}"
+            (cd build/bin && zip -r -y -X "$OUT_ABS" "$(basename "$APP")")
           fi
 
       - name: Upload app artifact

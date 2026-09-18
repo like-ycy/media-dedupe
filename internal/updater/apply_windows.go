@@ -12,7 +12,7 @@ import (
 	"syscall"
 )
 
-// ApplyAndRestart 在 Windows 上解压 tar.gz 中的 exe，替换当前程序并重启。
+// ApplyAndRestart 在 Windows 上解压 zip 中的 exe，替换当前程序并重启。
 // 运行中的 exe 有文件锁，由隐藏窗口批处理等待退出后完成替换。
 func (m *Manager) ApplyAndRestart() error {
 	pkgPath, tempDir, err := m.GetDownloadedFile()
@@ -25,7 +25,7 @@ func (m *Manager) ApplyAndRestart() error {
 		return fmt.Errorf("创建解压目录失败: %w", err)
 	}
 
-	if err := extractTarGz(pkgPath, extractedDir); err != nil {
+	if err := extractZip(pkgPath, extractedDir); err != nil {
 		return fmt.Errorf("解压更新包失败: %w", err)
 	}
 
