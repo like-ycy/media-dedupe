@@ -1,0 +1,103 @@
+@import "tailwindcss";
+
+/* CineVault Design System — Arco-inspired desktop tokens */
+@theme {
+  --color-overlay: rgb(29 33 41 / 48%);
+  --color-background: #f7f8fa;
+  --color-surface: #ffffff;
+  --color-surface-2: #f2f3f5;
+  --color-surface-3: #e5e6eb;
+  --color-foreground: #1d2129;
+  --color-muted: #4e5969;
+  --color-faint: #86909c;
+  --color-border: #e5e6eb;
+  --color-border-strong: #c9cdd4;
+  --color-primary: #165dff;
+  --color-primary-hover: #4080ff;
+  --color-primary-active: #0e42d2;
+  --color-primary-soft: #e8f3ff;
+  --color-success: #00b42a;
+  --color-success-soft: #e8ffea;
+  --color-warning: #ff7d00;
+  --color-warning-soft: #fff7e8;
+  --color-danger: #f53f3f;
+  --color-danger-soft: #ffece8;
+  --color-info: #0e42d2;
+  --color-info-soft: #e8f3ff;
+  --color-on-primary: #ffffff;
+
+  --radius-control: 6px;
+  --radius-card: 8px;
+  --radius-panel: 10px;
+  --radius-dialog: 12px;
+
+  --shadow-card: 0 1px 2px rgb(29 33 41 / 4%), 0 6px 18px rgb(29 33 41 / 5%);
+  --shadow-dialog: 0 18px 48px rgb(29 33 41 / 22%);
+
+  --font-sans: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", Consolas, monospace;
+}
+
+.dark {
+  color-scheme: dark;
+  --color-overlay: rgb(0 0 0 / 64%);
+  --color-background: #0b0d10;
+  --color-surface: #151a22;
+  --color-surface-2: #1d2633;
+  --color-surface-3: #263241;
+  --color-foreground: #f2f3f5;
+  --color-muted: #c9cdd4;
+  --color-faint: #86909c;
+  --color-border: #2a3441;
+  --color-border-strong: #3b4756;
+  --color-primary: #4080ff;
+  --color-primary-hover: #6aa1ff;
+  --color-primary-active: #165dff;
+  --color-primary-soft: #172c4a;
+  --color-success: #23c343;
+  --color-success-soft: #12351f;
+  --color-warning: #ffaa2c;
+  --color-warning-soft: #3a2914;
+  --color-danger: #f76969;
+  --color-danger-soft: #3b1e20;
+  --color-info: #4080ff;
+  --color-info-soft: #172c4a;
+  --color-on-primary: #ffffff;
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 30%), 0 6px 18px rgb(0 0 0 / 18%);
+  --shadow-dialog: 0 18px 48px rgb(0 0 0 / 55%);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+}
+
+@layer components {
+  .control-h-sm {
+    height: 28px;
+  }
+  .control-h {
+    height: 32px;
+  }
+  .control-h-lg {
+    height: 40px;
+  }
+}
+
+@font-face { font-family: Inter; font-weight: 100 900; font-display: swap; src: url('/assets/inter-var.woff2') format('woff2'); }
+@font-face { font-family: "JetBrains Mono"; font-weight: 100 800; font-display: swap; src: url('/assets/jetbrains-mono-var.woff2') format('woff2'); }
+@layer base {
+  html, body, #root { height: 100%; }
+  button:not(:disabled), [role=button] { cursor: pointer; }
+  button:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  svg { flex-shrink: 0; }
+}

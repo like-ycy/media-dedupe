@@ -40,7 +40,15 @@ App 入口：
 - 根目录 `main.go`（供 `wails build`）
 - `cmd/app/main.go`（同逻辑入口）
 
-前端静态资源：`frontend/dist/`（`index.html` + `app.css` + `app.js` + `assets/`），由 `frontend` 包 embed。
+前端源码位于 `frontend/src/`，使用 React + TypeScript + Tailwind CSS + shadcn/ui + Radix；构建产物输出到 `frontend/dist/`，由 `frontend` 包 embed。
+
+```bash
+cd frontend
+npm ci
+npm run build
+```
+
+浏览器预览（不连接 Wails，仅用于界面检查）：`npm run dev:mock`。
 
 ### 发布构建（GitHub Actions）
 

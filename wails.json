@@ -2,9 +2,9 @@
   "$schema": "https://wails.io/schemas/config.v2.json",
   "name": "media-dedupe",
   "outputfilename": "media-dedupe-app",
-  "frontend:install": "",
-  "frontend:build": "",
-  "frontend:dev:watcher": "",
+  "frontend:install": "npm ci",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
   "frontend:dev:serverUrl": "auto",
   "author": {
     "name": "media-dedupe",
@@ -12,5 +12,6 @@
   },
   "info": {
     "productVersion": "0.0.0-dev"
-  }
+  },
+  "frontend:dir": "frontend"
 }
