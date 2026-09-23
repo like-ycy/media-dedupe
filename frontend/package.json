@@ -27,7 +27,7 @@
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "tailwind-merge": "^3.3.1",
-    "xwang-ui": "git+https://github.com/like-ycy/xwang-ui.git#v0.1.1"
+    "xwang-ui": "https://github.com/like-ycy/xwang-ui.git#v0.1.1"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.13",
@@ -37,5 +37,8 @@
     "tailwindcss": "^4.1.13",
     "typescript": "^5.9.2",
     "vite": "^7.1.5"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
   }
 }
