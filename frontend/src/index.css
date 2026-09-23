@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "xwang-ui/styles.css";
 
 /* CineVault Design System — Arco-inspired desktop tokens */
 @theme {

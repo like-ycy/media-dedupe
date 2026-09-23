@@ -1,15 +1,7 @@
 import * as React from "react"
 import { Check, ChevronLeft, FolderOpen, Loader2, Moon, Monitor, Plus, RefreshCw, Search, Settings, Sun, Trash2, Upload, X, Zap } from "lucide-react"
 import { api, runtime, type AppInfo, type DownloadProgress, type Group, type GroupDetail, type Item, type Project, type ScanEvent, type ScanStatus, type Settings as AppSettings, type ThemePreference, type UpdateInfo, type View } from "./api"
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
-import { Card } from "@/components/ui/card"
-import { Checkbox } from "@/components/ui/checkbox"
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Progress } from "@/components/ui/progress"
-import { Switch } from "@/components/ui/switch"
+import { Badge, Button, Card, Checkbox, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, Input, Label, Progress, Switch } from "xwang-ui"
 
 const stages = [{ key: "discover", label: "发现文件" }, { key: "exact", label: "精确哈希 (SHA-256)" }, { key: "image", label: "图片感知哈希 (pHash)" }, { key: "video", label: "视频抽帧 (FFmpeg)" }, { key: "text", label: "TXT 正文相似度" }, { key: "match", label: "分组匹配" }]
 const typeLabel = (value: string) => ({ exact: "精确重复", similar_image: "视觉近似图片", similar_video: "视觉近似视频", similar_text: "文本近似重复" }[value] || value)
