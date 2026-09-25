@@ -1,8 +1,6 @@
 package ops
 
 import (
-	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -84,65 +82,7 @@ func moveToTrash(path string) error {
 	if err != nil {
 		return err
 	}
-	switch runtime.GOOS {
-	case "darwin":
-		return trashMac(abs)
-	case "windows":
-		return trashWindows(abs)
-	default:
-		// MVP: Linux falls back to permanent with explicit message — never silent.
-		err := os.Remove(abs)
-		if err != nil {
-			return err
-		}
-		return errors.New("Linux 回收站未实现，已永久删除（permanent fallback）")
-	}
-}
-
-func trashMac(path string) error {
-	script := fmt.Sprintf(`tell application "Finder" to delete POSIX file "%s"`, escapeAppleScript(path))
-	cmd := exec.Command("osascript", "-e", script)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		// Fallback to trashutil via mv into ~/.Trash
-		home, herr := os.UserHomeDir()
-		if herr != nil {
-			return fmt.Errorf("recycle failed: %v (%s)", err, strings.TrimSpace(string(out)))
-		}
-		trashDir := filepath.Join(home, ".Trash")
-		base := filepath.Base(path)
-		dst := filepath.Join(trashDir, base)
-		if _, statErr := os.Stat(dst); statErr == nil {
-			dst = filepath.Join(trashDir, fmt.Sprintf("%s.%d", base, os.Getpid()))
-		}
-		if mvErr := os.Rename(path, dst); mvErr != nil {
-			return fmt.Errorf("recycle failed: %v (fallback: %v)", err, mvErr)
-		}
-		return nil
-	}
-	return nil
-}
-
-func escapeAppleScript(s string) string {
-	return strings.ReplaceAll(s, `"`, `\"`)
-}
-
-func trashWindows(path string) error {
-	// PowerShell Microsoft.VisualBasic.FileIO — moves to Recycle Bin; fails loudly.
-	ps := fmt.Sprintf(
-		`[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('%s','OnlyErrorDialogs','SendToRecycleBin')`,
-		windowsQuote(path),
-	)
-	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", ps)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("recycle failed: %v (%s)", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-func windowsQuote(s string) string {
-	return strings.ReplaceAll(s, "'", "''")
+	return trashPath(abs)
 }
 
 func isProtected(path string) bool {
@@ -189,6 +129,7 @@ func OpenPath(path string) error {
 	default:
 		cmd = exec.Command("xdg-open", path)
 	}
+	prepareCmd(cmd)
 	return cmd.Start()
 }
 
@@ -210,5 +151,6 @@ func RevealInFolder(path string) error {
 	default:
 		cmd = exec.Command("xdg-open", filepath.Dir(abs))
 	}
+	prepareCmd(cmd)
 	return cmd.Start()
 }
