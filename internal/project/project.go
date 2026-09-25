@@ -378,6 +378,22 @@ func (s *Store) SaveLastScan(id string, summary LastSummary) error {
 	return s.persist()
 }
 
+// UpdateLastSummary refreshes only the stored summary (groups / pending /
+// reclaimable bytes) without touching LastScanAt. Called after groups are
+// ignored, marked processed, or their files deleted, so the results page
+// header and sidebar badge stay in sync with actual group states.
+func (s *Store) UpdateLastSummary(id string, summary LastSummary) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.projects[id]
+	if !ok {
+		return errors.New("项目不存在")
+	}
+	p.LastSummary = summary
+	p.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	return s.persist()
+}
+
 func (s *Store) LoadSettings() (Settings, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -448,6 +464,8 @@ func trimSpace(s string) string {
 }
 
 // ComputeSummary builds LastSummary from group list.
+// Only pending groups count toward ReclaimableBytes, so the figure drops as
+// groups are ignored / marked processed / their duplicates are deleted.
 func ComputeSummary(groups []model.ReportGroup) LastSummary {
 	var sum LastSummary
 	sum.Groups = len(groups)
@@ -458,14 +476,15 @@ func ComputeSummary(groups []model.ReportGroup) LastSummary {
 		case model.GroupSimilarImage, model.GroupSimilarVideo:
 			sum.SimilarGroups++
 		}
-		if g.Status == model.GroupPending || g.Status == "" {
+		pending := g.Status == model.GroupPending || g.Status == ""
+		if pending {
 			sum.PendingGroups++
-		}
-		for _, it := range g.Items {
-			if g.RecommendedFileID > 0 && it.FileID != g.RecommendedFileID {
-				sum.ReclaimableBytes += it.SizeBytes
-			} else if g.RecommendedFileID <= 0 && it.Action == model.ActionCleanup {
-				sum.ReclaimableBytes += it.SizeBytes
+			for _, it := range g.Items {
+				if g.RecommendedFileID > 0 && it.FileID != g.RecommendedFileID {
+					sum.ReclaimableBytes += it.SizeBytes
+				} else if g.RecommendedFileID <= 0 && it.Action == model.ActionCleanup {
+					sum.ReclaimableBytes += it.SizeBytes
+				}
 			}
 		}
 	}

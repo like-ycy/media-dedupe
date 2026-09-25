@@ -610,6 +610,25 @@ func (a *App) GetScanStatus(projectID string) ScanStatusDTO {
 	return ScanStatusDTO{ProjectID: projectID, Running: false}
 }
 
+// refreshLastSummary recomputes the project's stored summary from current
+// group states, keeping the results header and sidebar badge up to date
+// after groups are ignored / processed / their files deleted.
+func (a *App) refreshLastSummary(projectID string) {
+	if a.store == nil {
+		return
+	}
+	c, err := a.openProjectCache(projectID)
+	if err != nil {
+		return
+	}
+	groups, err := c.LoadReportGroups()
+	_ = c.Close()
+	if err != nil {
+		return
+	}
+	_ = a.store.UpdateLastSummary(projectID, project.ComputeSummary(groups))
+}
+
 func (a *App) openProjectCache(projectID string) (*cache.Cache, error) {
 	if a.store == nil {
 		return nil, errors.New("app not ready")
@@ -887,7 +906,11 @@ func (a *App) SetGroupStatus(projectID string, groupID int64, status string) err
 		return err
 	}
 	defer c.Close()
-	return c.SetGroupStatus(groupID, st)
+	if err := c.SetGroupStatus(groupID, st); err != nil {
+		return err
+	}
+	a.refreshLastSummary(projectID)
+	return nil
 }
 
 func (a *App) SetRecommended(projectID string, groupID int64, fileID int64) error {
@@ -896,7 +919,11 @@ func (a *App) SetRecommended(projectID string, groupID int64, fileID int64) erro
 		return err
 	}
 	defer c.Close()
-	return c.UpdateRecommended(groupID, fileID)
+	if err := c.UpdateRecommended(groupID, fileID); err != nil {
+		return err
+	}
+	a.refreshLastSummary(projectID)
+	return nil
 }
 
 func (a *App) GetThumbURL(projectID string, fileID int64) string {
@@ -1033,6 +1060,10 @@ func (a *App) DeleteFiles(req DeleteRequestDTO) (DeleteResultDTO, error) {
 			}
 			_ = c.Close()
 		}
+	}
+
+	if req.ProjectID != "" {
+		a.refreshLastSummary(req.ProjectID)
 	}
 
 	a.emitEvent("files:deleted", map[string]any{
