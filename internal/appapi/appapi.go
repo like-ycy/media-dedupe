@@ -803,6 +803,39 @@ func (a *App) ListGroups(projectID string, filter GroupFilter) ([]GroupListDTO, 
 	return out, nil
 }
 
+// expandCandidatePaths resolves group IDs to their non-recommended members so
+// bulk delete can run without the UI collecting paths first.
+func (a *App) expandCandidatePaths(projectID string, groupIDs []int64) ([]string, []int64, error) {
+	c, err := a.openProjectCache(projectID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer c.Close()
+	groups, err := c.LoadReportGroups()
+	if err != nil {
+		return nil, nil, err
+	}
+	want := make(map[int64]bool, len(groupIDs))
+	for _, id := range groupIDs {
+		want[id] = true
+	}
+	var paths []string
+	var fileIDs []int64
+	for _, g := range groups {
+		if !want[g.GroupID] {
+			continue
+		}
+		for _, it := range g.Items {
+			if it.FileID == g.RecommendedFileID {
+				continue
+			}
+			paths = append(paths, it.Path)
+			fileIDs = append(fileIDs, it.FileID)
+		}
+	}
+	return paths, fileIDs, nil
+}
+
 func (a *App) GetGroup(projectID string, groupID int64) (GroupDetailDTO, error) {
 	c, err := a.openProjectCache(projectID)
 	if err != nil {
@@ -993,9 +1026,21 @@ func (a *App) DeleteFiles(req DeleteRequestDTO) (DeleteResultDTO, error) {
 	if mode != "recycle" && mode != "permanent" {
 		return DeleteResultDTO{}, errors.New("invalid delete mode")
 	}
-	if len(req.Paths) == 0 {
+	paths := req.Paths
+	// Bulk delete from the results list only needs group IDs: expand to each
+	// group's non-recommended members here so the UI never ships path lists.
+	if len(paths) == 0 && len(req.GroupIDs) > 0 {
+		expanded, fileIDs, err := a.expandCandidatePaths(req.ProjectID, req.GroupIDs)
+		if err != nil {
+			return DeleteResultDTO{}, err
+		}
+		paths = expanded
+		req.FileIDs = fileIDs
+	}
+	if len(paths) == 0 {
 		return DeleteResultDTO{}, errors.New("没有选中任何文件")
 	}
+	req.Paths = paths
 	if len(req.GroupIDs) > 0 {
 		if err := a.validateGroupDeletes(req); err != nil {
 			return DeleteResultDTO{}, err
@@ -1015,39 +1060,47 @@ func (a *App) DeleteFiles(req DeleteRequestDTO) (DeleteResultDTO, error) {
 			for _, p := range res.Succeeded {
 				okSet[p] = true
 			}
+			failMsg := map[string]string{}
+			for _, f := range res.Failed {
+				failMsg[f.Path] = f.Message
+			}
 			groups, _ := c.LoadReportGroups()
-			type delRec struct {
-				FileID  int64
-				Path    string
-				OK      bool
-				Message string
+			// Only groups named in the request can change; avoid rescanning the
+			// whole project and replaying path matching per deleted file.
+			want := map[int64]bool{}
+			for _, id := range req.GroupIDs {
+				want[id] = true
 			}
-			for _, p := range req.Paths {
-				rec := delRec{Path: p, OK: okSet[p]}
-				if !rec.OK {
-					for _, f := range res.Failed {
-						if f.Path == p {
-							rec.Message = f.Message
-							break
-						}
+			for i := range groups {
+				g := &groups[i]
+				if len(want) > 0 && !want[g.GroupID] {
+					continue
+				}
+				recs := make([]cache.DeleteOpItem, 0, len(g.Items))
+				deleted := 0
+				for _, it := range g.Items {
+					if okSet[it.Path] {
+						recs = append(recs, cache.DeleteOpItem{FileID: it.FileID, Path: it.Path, OK: true})
+						deleted++
+						continue
+					}
+					if msg, failed := failMsg[it.Path]; failed {
+						recs = append(recs, cache.DeleteOpItem{FileID: it.FileID, Path: it.Path, Message: msg})
 					}
 				}
-				for _, g := range groups {
-					for _, it := range g.Items {
-						if it.Path == p {
-							_ = c.RecordDeleteOps(mode, g.GroupID, []struct {
-								FileID  int64
-								Path    string
-								OK      bool
-								Message string
-							}{{it.FileID, rec.Path, rec.OK, rec.Message}})
-						}
-					}
+				if len(recs) > 0 {
+					_ = c.RecordDeleteOps(mode, g.GroupID, recs)
 				}
-			}
-			for _, g := range groups {
+				if deleted == 0 {
+					continue
+				}
+				// Keepers that were never touched stay alive; only probe leftovers
+				// that might already have been missing before this delete.
 				alive := 0
 				for _, it := range g.Items {
+					if okSet[it.Path] {
+						continue
+					}
 					if _, err := os.Stat(it.Path); err == nil {
 						alive++
 					}

@@ -568,12 +568,15 @@ func (c *Cache) UpdateRecommended(groupID, fileID int64) error {
 	return tx.Commit()
 }
 
-func (c *Cache) RecordDeleteOps(mode string, groupID int64, items []struct {
+// DeleteOpItem is one deleted (or failed) member recorded against a group.
+type DeleteOpItem struct {
 	FileID  int64
 	Path    string
 	OK      bool
 	Message string
-}) error {
+}
+
+func (c *Cache) RecordDeleteOps(mode string, groupID int64, items []DeleteOpItem) error {
 	tx, err := c.db.Begin()
 	if err != nil {
 		return err
