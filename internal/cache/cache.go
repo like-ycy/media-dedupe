@@ -285,6 +285,8 @@ func (c *Cache) LoadFileHash(fileID int64) (string, bool, error) {
 	return full.String, true, nil
 }
 
+const textFactVersion = 2
+
 func (c *Cache) SaveTextFact(fileID, sizeBytes int64, length int, name string, features []uint64) error {
 	b, err := json.Marshal(features)
 	if err != nil {
@@ -292,14 +294,14 @@ func (c *Cache) SaveTextFact(fileID, sizeBytes int64, length int, name string, f
 	}
 	_, err = c.db.Exec(`
 INSERT INTO text_facts (file_id, size_bytes, normalized_length, name_key, features_json, version)
-VALUES (?, ?, ?, ?, ?, 1)
+VALUES (?, ?, ?, ?, ?, ?)
 ON CONFLICT(file_id) DO UPDATE SET
   size_bytes=excluded.size_bytes,
   normalized_length=excluded.normalized_length,
   name_key=excluded.name_key,
   features_json=excluded.features_json,
   version=excluded.version
-`, fileID, sizeBytes, length, name, string(b))
+`, fileID, sizeBytes, length, name, string(b), textFactVersion)
 	return err
 }
 
@@ -307,8 +309,8 @@ func (c *Cache) LoadTextFact(fileID, sizeBytes int64) (name string, length int, 
 	var raw string
 	if err = c.db.QueryRow(`
 SELECT name_key, normalized_length, features_json
-FROM text_facts WHERE file_id = ? AND size_bytes = ? AND version = 1
-`, fileID, sizeBytes).Scan(&name, &length, &raw); err == sql.ErrNoRows {
+FROM text_facts WHERE file_id = ? AND size_bytes = ? AND version = ?
+`, fileID, sizeBytes, textFactVersion).Scan(&name, &length, &raw); err == sql.ErrNoRows {
 		return "", 0, nil, false, nil
 	} else if err != nil {
 		return "", 0, nil, false, err

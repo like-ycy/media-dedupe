@@ -23,11 +23,18 @@ import (
 )
 
 const (
-	featureWindow = 7
+	// featureNgram is character n-gram width (runes). Dense overlapping
+	// n-grams keep near-duplicates robust when headers/edits shift text.
+	featureNgram  = 5
 	maxFeatures   = 8192
 	maxBucketSize = 256
 	minHashBands  = 8
 	minHashRows   = 2
+
+	nameMatchThreshold = 0.85
+	// Same-title files may be repackaged editions with weaker content overlap.
+	nameMatchFloorDelta = 0.30
+	plainFloorDelta     = 0.04
 )
 
 type Fact struct {
@@ -141,8 +148,16 @@ func Groups(facts []Fact, threshold float64) []model.ReportGroup {
 			continue
 		}
 		similarity := similarity(a, b)
-		if similarity < threshold && (nameSimilarity(a.Name, b.Name) < 0.85 || similarity < threshold-0.04) {
-			continue
+		if similarity < threshold {
+			// Near-threshold content stands alone; high name similarity only
+			// widens the band further for partial-volume repacks.
+			floor := threshold - plainFloorDelta
+			if nameSimilarity(a.Name, b.Name) >= nameMatchThreshold {
+				floor = threshold - nameMatchFloorDelta
+			}
+			if similarity < floor {
+				continue
+			}
 		}
 		key := match.EdgeKey(a.FileID, b.FileID)
 		similarities[key] = similarity
@@ -274,37 +289,36 @@ func normalize(value string) string {
 }
 
 func features(content string) []uint64 {
-	if len(content) < featureWindow {
+	runes := []rune(content)
+	n := len(runes)
+	if n < featureNgram {
 		return nil
 	}
-	stride := (len(content)-featureWindow)/maxFeatures + 1
-	if stride < 3 {
-		stride = 3
+	// Dense overlapping character n-grams: positional stride sampling breaks
+	// as soon as two repacks drift, which is the common case for long novels.
+	hashes := make([]uint64, 0, n-featureNgram+1)
+	for i := 0; i+featureNgram <= n; i++ {
+		hashes = append(hashes, fnv64Runes(runes[i:i+featureNgram]))
 	}
-	values := make([]uint64, 0, maxFeatures)
-	perOffset := maxFeatures / 8
-	for offset := 0; offset < 8 && len(values) < maxFeatures; offset++ {
-		start := offset * stride / 8
-		for i, count := start, 0; i+featureWindow <= len(content) && count < perOffset; i, count = i+stride, count+1 {
-			values = append(values, fnv64(content[i:i+featureWindow]))
-		}
-	}
-	sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
-	unique := make([]uint64, 0, len(values))
-	for _, value := range values {
+	sort.Slice(hashes, func(i, j int) bool { return hashes[i] < hashes[j] })
+	unique := make([]uint64, 0, min(len(hashes), maxFeatures))
+	for _, value := range hashes {
 		if len(unique) == 0 || unique[len(unique)-1] != value {
 			unique = append(unique, value)
+			if len(unique) >= maxFeatures {
+				break
+			}
 		}
 	}
 	return unique
 }
 
-func fnv64(value string) uint64 {
+func fnv64Runes(value []rune) uint64 {
 	const offset64 = uint64(14695981039346656037)
 	const prime64 = uint64(1099511628211)
 	h := offset64
-	for i := 0; i < len(value); i++ {
-		h ^= uint64(value[i])
+	for _, r := range value {
+		h ^= uint64(uint32(r))
 		h *= prime64
 	}
 	return h
@@ -438,27 +452,54 @@ func normalizeName(name string) string {
 }
 
 func nameSimilarity(a, b string) float64 {
-	left := strings.Fields(a)
-	right := strings.Fields(b)
+	left := nameGrams(a)
+	right := nameGrams(b)
 	if len(left) == 0 || len(right) == 0 {
 		return 0
 	}
-	set := make(map[string]struct{}, len(left))
-	for _, token := range left {
-		set[token] = struct{}{}
-	}
 	common := 0
-	seen := make(map[string]struct{}, len(right))
-	for _, token := range right {
-		if _, ok := seen[token]; ok {
-			continue
-		}
-		seen[token] = struct{}{}
-		if _, ok := set[token]; ok {
+	for token := range left {
+		if _, ok := right[token]; ok {
 			common++
 		}
 	}
-	return float64(common) / float64(len(set)+len(seen)-common)
+	union := len(left) + len(right) - common
+	if union == 0 {
+		return 0
+	}
+	jaccard := float64(common) / float64(union)
+	// Containment catches "title" vs "title（卷章/作者…）" packaging names.
+	containment := float64(common) / float64(min(len(left), len(right)))
+	if containment > jaccard {
+		return containment
+	}
+	return jaccard
+}
+
+func nameGrams(name string) map[string]struct{} {
+	grams := make(map[string]struct{})
+	for _, token := range strings.Fields(name) {
+		grams[token] = struct{}{}
+		runes := []rune(token)
+		if !hasHan(runes) {
+			continue
+		}
+		// Chinese filenames are rarely space-separated; bigrams give the
+		// shared-title signal that whole-token matching misses.
+		for i := 0; i+1 < len(runes); i++ {
+			grams[string(runes[i:i+2])] = struct{}{}
+		}
+	}
+	return grams
+}
+
+func hasHan(runes []rune) bool {
+	for _, r := range runes {
+		if unicode.Is(unicode.Han, r) {
+			return true
+		}
+	}
+	return false
 }
 
 func bestSimilarity(id int64, component []int64, similarities map[[2]int64]float64) float64 {
