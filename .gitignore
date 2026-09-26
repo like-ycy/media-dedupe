@@ -53,3 +53,4 @@ vendor/
 .serena/
 tests/
 **/*_test.go
+.workbuddy/
