@@ -40,9 +40,8 @@ var PHashSkippedExtensions = map[string]struct{}{
 	".heic": {}, ".heif": {},
 }
 
-// DefaultCacheDir is the portable data root next to the program
-// (<program_dir>/data). Scan caches stay visible and can be deleted
-// after a project is finished.
+// DefaultCacheDir matches AppRoot: Windows uses <program_dir>/media-dedupe-cache
+// (visible, deletable after a project); macOS/other use ~/.media-dedupe.
 func DefaultCacheDir() string {
 	return AppRoot()
 }

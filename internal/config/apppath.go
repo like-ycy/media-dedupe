@@ -8,11 +8,8 @@ import (
 )
 
 // ExecutableDir returns the directory that contains the running program.
-// Portable layout: all scan caches / project data live under this directory
-// so users can see them and delete them after finishing a project.
 //
 // - Normal binary: directory of the executable (symlinks resolved).
-// - macOS .app bundle: the folder containing the .app, not Contents/MacOS.
 // - `go run` / temp-dir binaries: current working directory.
 func ExecutableDir() string {
 	exe, err := os.Executable()
@@ -26,20 +23,28 @@ func ExecutableDir() string {
 	if isTempDir(dir) {
 		return workingDir()
 	}
-	if runtime.GOOS == "darwin" {
-		if parent := macAppBundleParent(dir); parent != "" {
-			return parent
-		}
-	}
 	return dir
 }
 
-// AppRoot returns the portable data root next to the running program.
-// Layout: <program_dir>/data — one visible folder users can delete wholesale.
+// AppRoot returns the cache / project data root.
 //
-// WebView2's EBWebView (Windows) is left alone; the OS manages it.
+// Windows (primary): <program_dir>/media-dedupe-cache
+//
+//	Visible next to the exe so a finished project can be deleted wholesale.
+//	WebView2's EBWebView is left alone; the OS manages it.
+//
+// macOS / other (debug): ~/.media-dedupe
+//
+//	Local runs only touch a few test files, so a home-dir root is enough.
 func AppRoot() string {
-	return filepath.Join(ExecutableDir(), "data")
+	if runtime.GOOS == "windows" {
+		return filepath.Join(ExecutableDir(), "media-dedupe-cache")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(ExecutableDir(), "media-dedupe-cache")
+	}
+	return filepath.Join(home, ".media-dedupe")
 }
 
 // EnsureAppRoot creates the app root directory if missing.
@@ -73,17 +78,4 @@ func isTempDir(dir string) bool {
 		return false
 	}
 	return absDir == absTmp || strings.HasPrefix(absDir, absTmp+string(filepath.Separator))
-}
-
-// macAppBundleParent maps .../Name.app/Contents/MacOS → parent of Name.app.
-func macAppBundleParent(dir string) string {
-	macOS := filepath.Dir(dir)
-	contents := filepath.Dir(macOS)
-	appBundle := filepath.Dir(contents)
-	if filepath.Base(macOS) == "MacOS" &&
-		filepath.Base(contents) == "Contents" &&
-		strings.HasSuffix(appBundle, ".app") {
-		return filepath.Dir(appBundle)
-	}
-	return ""
 }

@@ -96,23 +96,26 @@ go run ./scripts/generate_testdata.go
 
 ### App 数据目录
 
-除 Windows WebView2 自行维护的 `EBWebView` 外，所有落盘数据都在**程序所在目录**的 `data/` 下，扫完一个项目可直接删掉该目录，再配置下一个项目：
+除 Windows WebView2 自行维护的 `EBWebView` 外：
+
+| OS | 路径 | 说明 |
+|---|---|---|
+| Windows（主用） | `<程序目录>/media-dedupe-cache/` | 与 exe 同级，扫完整项目可直接删除 |
+| macOS / 其他（调试） | `~/.media-dedupe/` | 本地只跑少量测试文件 |
 
 ```
-<程序目录>/
-  media-dedupe(.exe)
-  data/
-    settings.json
-    projects.json
-    recent.sqlite
-    projects/{id}/
-      cache.sqlite
-      thumbs/
-      frames/
-      reports/
+media-dedupe-cache/          # Windows；macOS 为 ~/.media-dedupe
+  settings.json
+  projects.json
+  recent.sqlite
+  projects/{id}/
+    cache.sqlite
+    thumbs/
+    frames/
+    reports/
 ```
 
-CLI 默认缓存同样写在 `data/`（可用 `--cache` 覆盖）。
+CLI 默认缓存同样写在上述根目录（可用 `--cache` 覆盖）。
 
 ## 行为说明
 
