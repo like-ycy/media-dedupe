@@ -1,10 +1,6 @@
 package config
 
-import (
-	"os"
-	"path/filepath"
-	"runtime"
-)
+import "path/filepath"
 
 const (
 	DefaultSimilarityThreshold     = 0.80
@@ -44,24 +40,11 @@ var PHashSkippedExtensions = map[string]struct{}{
 	".heic": {}, ".heif": {},
 }
 
+// DefaultCacheDir is the portable data root next to the program
+// (<program_dir>/data). Scan caches stay visible and can be deleted
+// after a project is finished.
 func DefaultCacheDir() string {
-	switch runtime.GOOS {
-	case "darwin":
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return ".media-dedupe"
-		}
-		return filepath.Join(home, "Library", "Caches", "media-dedupe")
-	default:
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return ".media-dedupe"
-		}
-		if xdg := os.Getenv("XDG_CACHE_HOME"); xdg != "" {
-			return filepath.Join(xdg, "media-dedupe")
-		}
-		return filepath.Join(home, ".cache", "media-dedupe")
-	}
+	return AppRoot()
 }
 
 func DefaultCachePath() string {

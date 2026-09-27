@@ -96,13 +96,23 @@ go run ./scripts/generate_testdata.go
 
 ### App 数据目录
 
-| OS | 路径 |
-|---|---|
-| Windows | `%AppData%/media-dedupe` |
-| macOS | `~/Library/Application Support/media-dedupe` |
-| Linux | `$XDG_DATA_HOME/media-dedupe` 或 `~/.local/share/media-dedupe` |
+除 Windows WebView2 自行维护的 `EBWebView` 外，所有落盘数据都在**程序所在目录**的 `data/` 下，扫完一个项目可直接删掉该目录，再配置下一个项目：
 
-每项目：`projects/{id}/cache.sqlite`、`thumbs/`、`frames/`、`reports/`
+```
+<程序目录>/
+  media-dedupe(.exe)
+  data/
+    settings.json
+    projects.json
+    recent.sqlite
+    projects/{id}/
+      cache.sqlite
+      thumbs/
+      frames/
+      reports/
+```
+
+CLI 默认缓存同样写在 `data/`（可用 `--cache` 覆盖）。
 
 ## 行为说明
 

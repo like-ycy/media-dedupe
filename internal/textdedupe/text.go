@@ -25,8 +25,10 @@ import (
 const (
 	// featureNgram is character n-gram width (runes). Dense overlapping
 	// n-grams keep near-duplicates robust when headers/edits shift text.
-	featureNgram  = 5
-	maxFeatures   = 8192
+	featureNgram = 5
+	// Cap shingles kept on disk/in memory. Thousands of txt files would
+	// otherwise store multi-MB JSON feature lists and bloat cache.sqlite.
+	maxFeatures   = 1024
 	maxBucketSize = 256
 	minHashBands  = 8
 	minHashRows   = 2

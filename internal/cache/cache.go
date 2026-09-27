@@ -2,6 +2,7 @@ package cache
 
 import (
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -41,6 +42,8 @@ func (c *Cache) Close() error {
 	if c == nil || c.db == nil {
 		return nil
 	}
+	// Fold WAL back into the main db so the on-disk size stays honest.
+	_, _ = c.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
 	return c.db.Close()
 }
 
@@ -98,7 +101,8 @@ CREATE TABLE IF NOT EXISTS text_facts (
     size_bytes INTEGER NOT NULL,
     normalized_length INTEGER NOT NULL,
     name_key TEXT NOT NULL,
-    features_json TEXT NOT NULL,
+    features_json TEXT,
+    features_blob BLOB,
     version INTEGER NOT NULL DEFAULT 1,
     FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
 );
@@ -152,6 +156,9 @@ CREATE INDEX IF NOT EXISTS idx_files_size ON files(size_bytes);
 	_, _ = c.db.Exec(`ALTER TABLE duplicate_groups ADD COLUMN stable_key TEXT`)
 	_, _ = c.db.Exec(`ALTER TABLE duplicate_groups ADD COLUMN ignored_at TEXT`)
 	_, _ = c.db.Exec(`ALTER TABLE duplicate_groups ADD COLUMN processed_at TEXT`)
+	// Older caches stored text features as JSON arrays (very large). Prefer
+	// packed uint64 blobs; keep the JSON column readable for legacy rows.
+	_, _ = c.db.Exec(`ALTER TABLE text_facts ADD COLUMN features_blob BLOB`)
 	_, _ = c.db.Exec(`
 CREATE TABLE IF NOT EXISTS delete_ops (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -285,40 +292,81 @@ func (c *Cache) LoadFileHash(fileID int64) (string, bool, error) {
 	return full.String, true, nil
 }
 
-const textFactVersion = 2
+// textFactVersion invalidates legacy JSON feature rows (v2 and earlier)
+// so a rescan rewrites them as compact blobs.
+const textFactVersion = 3
 
 func (c *Cache) SaveTextFact(fileID, sizeBytes int64, length int, name string, features []uint64) error {
-	b, err := json.Marshal(features)
-	if err != nil {
-		return err
-	}
-	_, err = c.db.Exec(`
-INSERT INTO text_facts (file_id, size_bytes, normalized_length, name_key, features_json, version)
-VALUES (?, ?, ?, ?, ?, ?)
+	blob := encodeFeatures(features)
+	// features_json stays empty for new rows; older schemas require a value.
+	_, err := c.db.Exec(`
+INSERT INTO text_facts (file_id, size_bytes, normalized_length, name_key, features_blob, features_json, version)
+VALUES (?, ?, ?, ?, ?, '', ?)
 ON CONFLICT(file_id) DO UPDATE SET
   size_bytes=excluded.size_bytes,
   normalized_length=excluded.normalized_length,
   name_key=excluded.name_key,
-  features_json=excluded.features_json,
+  features_blob=excluded.features_blob,
+  features_json='',
   version=excluded.version
-`, fileID, sizeBytes, length, name, string(b), textFactVersion)
+`, fileID, sizeBytes, length, name, blob, textFactVersion)
 	return err
 }
 
 func (c *Cache) LoadTextFact(fileID, sizeBytes int64) (name string, length int, features []uint64, ok bool, err error) {
-	var raw string
-	if err = c.db.QueryRow(`
-SELECT name_key, normalized_length, features_json
+	var (
+		blob []byte
+		raw  sql.NullString
+	)
+	err = c.db.QueryRow(`
+SELECT name_key, normalized_length, features_blob, features_json
 FROM text_facts WHERE file_id = ? AND size_bytes = ? AND version = ?
-`, fileID, sizeBytes, textFactVersion).Scan(&name, &length, &raw); err == sql.ErrNoRows {
+`, fileID, sizeBytes, textFactVersion).Scan(&name, &length, &blob, &raw)
+	if err == sql.ErrNoRows {
 		return "", 0, nil, false, nil
-	} else if err != nil {
+	}
+	if err != nil {
 		return "", 0, nil, false, err
 	}
-	if err = json.Unmarshal([]byte(raw), &features); err != nil {
-		return "", 0, nil, false, err
+	if len(blob) > 0 {
+		features, err = decodeFeatures(blob)
+		if err != nil {
+			return "", 0, nil, false, err
+		}
+		return name, length, features, true, nil
 	}
-	return name, length, features, true, nil
+	if raw.Valid && raw.String != "" {
+		if err = json.Unmarshal([]byte(raw.String), &features); err != nil {
+			return "", 0, nil, false, err
+		}
+		return name, length, features, true, nil
+	}
+	return name, length, nil, true, nil
+}
+
+func encodeFeatures(features []uint64) []byte {
+	if len(features) == 0 {
+		return nil
+	}
+	b := make([]byte, 8*len(features))
+	for i, f := range features {
+		binary.LittleEndian.PutUint64(b[i*8:], f)
+	}
+	return b
+}
+
+func decodeFeatures(b []byte) ([]uint64, error) {
+	if len(b) == 0 {
+		return nil, nil
+	}
+	if len(b)%8 != 0 {
+		return nil, fmt.Errorf("text features blob length %d not multiple of 8", len(b))
+	}
+	out := make([]uint64, len(b)/8)
+	for i := range out {
+		out[i] = binary.LittleEndian.Uint64(b[i*8:])
+	}
+	return out, nil
 }
 
 func (c *Cache) SaveImageMetadata(fileID int64, m model.ImageMetadata) error {
@@ -822,5 +870,11 @@ func (c *Cache) Clear() error {
 			return err
 		}
 	}
-	return nil
+	return c.Vacuum()
+}
+
+// Vacuum reclaims freelist pages so cache.sqlite shrinks after deletes.
+func (c *Cache) Vacuum() error {
+	_, err := c.db.Exec(`VACUUM`)
+	return err
 }
