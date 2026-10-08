@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -316,10 +318,6 @@ func Scan(opts Options) (*Result, error) {
 	// Do not pre-generate JPEG thumbs: the UI previews original images
 	// (Explorer-style) and uses fixed icons for video/text.
 
-	if opts.FrameDir != "" {
-		saveFramePreviews(c, opts.FrameDir)
-	}
-
 	if err := c.ReplaceReportGroups(groups, scanRunID); err != nil {
 		return nil, err
 	}
@@ -462,7 +460,7 @@ func exactPass(
 				f := files[idx]
 				fileID := infos[idx].fileID
 				used[f.Path] = struct{}{}
-				q := qualityFor(c, f, fileID, infos[idx].unchanged, recordErr)
+				q := qualityFor(ctx, c, f, fileID, infos[idx].unchanged, recordErr)
 				quality[fileID] = q
 			}
 			actions := score.ChooseActions(quality, -1.0)
@@ -493,6 +491,7 @@ func exactPass(
 }
 
 func qualityFor(
+	ctx context.Context,
 	c *cache.Cache,
 	f model.DiscoveredFile,
 	fileID int64,
@@ -506,7 +505,7 @@ func qualityFor(
 		meta := loadImageMeta(c, f, fileID, unchanged, recordErr)
 		return score.ImageQuality(meta, f.SizeBytes)
 	}
-	meta := loadVideoMeta(c, f, fileID, unchanged, recordErr)
+	meta := loadVideoMeta(ctx, c, f, fileID, unchanged, recordErr)
 	return score.VideoQuality(meta)
 }
 
@@ -531,6 +530,7 @@ func loadImageMeta(
 }
 
 func loadVideoMeta(
+	ctx context.Context,
 	c *cache.Cache,
 	f model.DiscoveredFile,
 	fileID int64,
@@ -539,13 +539,22 @@ func loadVideoMeta(
 ) model.VideoMetadata {
 	if unchanged {
 		if m, ok, err := c.LoadVideoMetadata(fileID); err == nil && ok {
+			if !m.IsReadable {
+				recordErr(f.Path, "video_metadata", "unreadable video")
+			}
 			return m
 		}
 	}
-	m := video.ProbeMetadata(f.Path)
-	_ = c.SaveVideoMetadata(fileID, m)
+	m := video.ProbeMetadataContext(ctx, f.Path)
+	if ctx.Err() != nil {
+		return model.VideoMetadata{}
+	}
 	if !m.IsReadable {
 		recordErr(f.Path, "video_metadata", "unreadable video")
+		return m
+	}
+	if err := c.SaveVideoMetadata(fileID, m); err != nil {
+		recordErr(f.Path, "video_metadata", err.Error())
 	}
 	return m
 }
@@ -693,6 +702,24 @@ func collectVideos(
 	}
 	defer os.RemoveAll(tmpRoot)
 
+	// Index old previews once rather than rereading the growing directory per video.
+	previewFiles := make(map[string][]string)
+	if opts.FrameDir != "" {
+		entries, err := os.ReadDir(opts.FrameDir)
+		if err != nil && !os.IsNotExist(err) {
+			recordErr(opts.FrameDir, "video_preview", err.Error())
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jpg") {
+				continue
+			}
+			id, _, ok := strings.Cut(entry.Name(), "_")
+			if ok {
+				previewFiles[id] = append(previewFiles[id], filepath.Join(opts.FrameDir, entry.Name()))
+			}
+		}
+	}
+
 	var targets []int
 	for i, f := range files {
 		if f.MediaType != model.MediaVideo || infos[i].fileID == 0 {
@@ -705,10 +732,12 @@ func collectVideos(
 	}
 
 	out := make([]*videoFacts, len(targets))
-	var slotMu sync.Mutex
 	g := errgroup.Group{}
 	g.SetLimit(opts.VideoWorkers)
 	for j, idx := range targets {
+		if ctx.Err() != nil {
+			break
+		}
 		j, idx := j, idx
 		g.Go(func() error {
 			if ctx.Err() != nil {
@@ -718,14 +747,17 @@ func collectVideos(
 			fileID := infos[idx].fileID
 			unchanged := infos[idx].unchanged
 
-			meta := loadVideoMeta(c, f, fileID, unchanged, recordErr)
+			meta := loadVideoMeta(ctx, c, f, fileID, unchanged, recordErr)
 			if !meta.IsReadable || meta.DurationMs <= 0 {
 				return nil
 			}
 
 			var hashes []string
+			hashType := video.FrameHashType(opts.FrameCount)
 			if unchanged {
-				if hs, err := c.LoadPerceptualHashes(fileID, "video_frame_phash"); err == nil && len(hs) > 0 {
+				if hs, err := c.LoadPerceptualHashes(fileID, hashType); err != nil {
+					recordErr(f.Path, "video_cache", err.Error())
+				} else {
 					hashes = hs
 				}
 			}
@@ -735,16 +767,46 @@ func collectVideos(
 					recordErr(f.Path, "video_frame_phash", err.Error())
 					return nil
 				}
-				hs, err := video.ComputeFrameHashes(f.Path, meta, opts.FrameCount, config.DefaultFrameFailureLimit, fileTmp)
+				defer os.RemoveAll(fileTmp)
+				if err := clearFramePreviews(c, fileID, previewFiles[fmt.Sprint(fileID)]); err != nil {
+					recordErr(f.Path, "video_preview", err.Error())
+				}
+				framePaths, err := video.ExtractFramesContext(ctx, f.Path, meta, opts.FrameCount, fileTmp)
 				if err != nil {
-					recordErr(f.Path, "video_frame_phash", err.Error())
+					if ctx.Err() == nil {
+						recordErr(f.Path, "video_frame_phash", err.Error())
+					}
+					return nil
+				}
+				hs, err := video.HashFrames(ctx, framePaths, config.DefaultFrameFailureLimit)
+				if err != nil {
+					if ctx.Err() == nil {
+						recordErr(f.Path, "video_frame_phash", err.Error())
+					}
 					return nil
 				}
 				hashes = hs
-				_ = c.SavePerceptualHashes(fileID, "video_frame_phash", hashes)
+				if opts.FrameDir != "" {
+					if err := copyFramePreviews(ctx, c, framePaths, fileID, opts.FrameDir, hashType); err != nil && ctx.Err() == nil {
+						recordErr(f.Path, "video_preview", err.Error())
+						if err := c.ReplaceFramePreviews(fileID, nil); err != nil {
+							recordErr(f.Path, "video_preview", err.Error())
+						}
+					}
+				}
+				if ctx.Err() != nil {
+					return nil
+				}
+				if err := c.SavePerceptualHashes(fileID, hashType, hashes); err != nil {
+					recordErr(f.Path, "video_cache", err.Error())
+				}
+			} else if opts.FrameDir != "" {
+				if err := ensureFramePreviews(ctx, c, f.Path, meta, fileID, opts.FrameDir, opts.FrameCount, hashType); err != nil && ctx.Err() == nil {
+					recordErr(f.Path, "video_preview", err.Error())
+				}
 			}
-			if opts.FrameDir != "" {
-				exportFramePreviews(f.Path, meta, fileID, opts.FrameDir, opts.FrameCount)
+			if ctx.Err() != nil {
+				return nil
 			}
 			fact := &videoFacts{
 				fileID:    fileID,
@@ -755,9 +817,7 @@ func collectVideos(
 				hashes:    hashes,
 				quality:   score.VideoQuality(meta),
 			}
-			slotMu.Lock()
 			out[j] = fact
-			slotMu.Unlock()
 			return nil
 		})
 	}
@@ -772,43 +832,106 @@ func collectVideos(
 	return facts
 }
 
-func exportFramePreviews(path string, meta model.VideoMetadata, fileID int64, frameDir string, frameCount int) {
-	_ = os.MkdirAll(frameDir, 0o755)
-	timestamps := video.BuildFrameTimestamps(meta.DurationMs, frameCount)
-	for i, ts := range timestamps {
-		out := filepath.Join(frameDir, fmt.Sprintf("%d_%d.jpg", fileID, i))
-		if _, err := os.Stat(out); err == nil {
-			continue
-		}
-		if err := video.ExtractFrame(path, ts, out); err != nil {
-			continue
-		}
-	}
+func framePreviewPath(frameDir string, fileID int64, hashType string, index int) string {
+	return filepath.Join(frameDir, fmt.Sprintf("%d_%s_%d.jpg", fileID, hashType, index))
 }
 
-func saveFramePreviews(c *cache.Cache, frameDir string) {
-	entries, err := os.ReadDir(frameDir)
+func ensureFramePreviews(ctx context.Context, c *cache.Cache, path string, meta model.VideoMetadata, fileID int64, frameDir string, frameCount int, hashType string) error {
+	registered, err := c.LoadFramePreviews(fileID)
 	if err != nil {
-		return
+		return err
 	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".jpg") {
-			continue
+	valid := make(map[string]struct{}, len(registered))
+	prefix := fmt.Sprintf("%d_%s_", fileID, hashType)
+	for _, path := range registered {
+		if strings.HasPrefix(filepath.Base(path), prefix) {
+			valid[path] = struct{}{}
 		}
-		base := strings.TrimSuffix(e.Name(), ".jpg")
-		parts := strings.SplitN(base, "_", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		var fileID, idx int
-		if _, err := fmt.Sscanf(parts[0], "%d", &fileID); err != nil {
-			continue
-		}
-		if _, err := fmt.Sscanf(parts[1], "%d", &idx); err != nil {
-			continue
-		}
-		_ = c.SaveFramePreview(int64(fileID), idx, filepath.Join(frameDir, e.Name()))
 	}
+	timestamps := video.BuildFrameTimestamps(meta.DurationMs, frameCount)
+	paths := make([]string, 0, len(timestamps))
+	for i, ts := range timestamps {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		out := framePreviewPath(frameDir, fileID, hashType, i)
+		// A committed preview set includes all available timestamps. An omitted
+		// position can be past the final frame in a short, low-frame-rate video.
+		if _, registered := valid[out]; !registered && len(valid) > 0 {
+			continue
+		}
+		if _, trusted := valid[out]; trusted {
+			if info, err := os.Stat(out); err == nil && info.Mode().IsRegular() && info.Size() > 0 {
+				paths = append(paths, out)
+				continue
+			} else if err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+		if err := video.ExtractFrameContext(ctx, path, ts, out); err != nil {
+			if errors.Is(err, video.ErrNoFrame) {
+				continue
+			}
+			return err
+		}
+		paths = append(paths, out)
+	}
+	return c.ReplaceFramePreviews(fileID, paths)
+}
+
+func clearFramePreviews(c *cache.Cache, fileID int64, paths []string) error {
+	if err := c.ReplaceFramePreviews(fileID, nil); err != nil {
+		return err
+	}
+	for _, path := range paths {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func copyFramePreviews(ctx context.Context, c *cache.Cache, framePaths []string, fileID int64, frameDir, hashType string) error {
+	if err := os.MkdirAll(frameDir, 0o755); err != nil {
+		return err
+	}
+	paths := make([]string, 0, len(framePaths))
+	for index, framePath := range framePaths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if framePath == "" {
+			continue
+		}
+		out := framePreviewPath(frameDir, fileID, hashType, index)
+		if err := copyFrame(framePath, out); err != nil {
+			return err
+		}
+		paths = append(paths, out)
+	}
+	return c.ReplaceFramePreviews(fileID, paths)
+}
+
+func copyFrame(source, destination string) error {
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(destination)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, in)
+	closeErr := out.Close()
+	if copyErr != nil {
+		_ = os.Remove(destination)
+		return copyErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(destination)
+	}
+	return closeErr
 }
 
 func videoSimilarity(facts []videoFacts, opts Options) []model.ReportGroup {

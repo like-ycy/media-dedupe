@@ -13,6 +13,7 @@ const (
 	DefaultReviewDelta             = 0.02
 	MaxImagePixels                 = 100_000_000
 	FFmpegTimeoutSeconds           = 30
+	FFmpegThreads                  = 2
 )
 
 var ImageExtensions = map[string]struct{}{

@@ -974,35 +974,17 @@ func (a *App) GetFrameURLs(projectID string, fileID int64) []string {
 	_ = a.media.AllowRoot(a.store.FrameDir(projectID))
 	c, err := a.openProjectCache(projectID)
 	if err != nil {
-		return a.listFrameURLs(projectID, fileID)
+		return []string{}
 	}
 	defer c.Close()
 	paths, err := c.LoadFramePreviews(fileID)
 	if err != nil || len(paths) == 0 {
-		return a.listFrameURLs(projectID, fileID)
+		return []string{}
 	}
 	out := make([]string, 0, len(paths))
 	for _, p := range paths {
 		if u := a.mediaURLFromPath(p); u != "" {
 			out = append(out, u)
-		}
-	}
-	return out
-}
-
-func (a *App) listFrameURLs(projectID string, fileID int64) []string {
-	dir := a.store.FrameDir(projectID)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return []string{}
-	}
-	prefix := fmt.Sprintf("%d_", fileID)
-	var out []string
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), prefix) && strings.HasSuffix(strings.ToLower(e.Name()), ".jpg") {
-			if u := a.mediaURLFromPath(filepath.Join(dir, e.Name())); u != "" {
-				out = append(out, u)
-			}
 		}
 	}
 	return out

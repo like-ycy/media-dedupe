@@ -2,6 +2,7 @@ package textdedupe
 
 import (
 	"bufio"
+	"container/heap"
 	"fmt"
 	"io"
 	"os"
@@ -291,28 +292,59 @@ func normalize(value string) string {
 }
 
 func features(content string) []uint64 {
-	runes := []rune(content)
-	n := len(runes)
-	if n < featureNgram {
-		return nil
-	}
-	// Dense overlapping character n-grams: positional stride sampling breaks
-	// as soon as two repacks drift, which is the common case for long novels.
-	hashes := make([]uint64, 0, n-featureNgram+1)
-	for i := 0; i+featureNgram <= n; i++ {
-		hashes = append(hashes, fnv64Runes(runes[i:i+featureNgram]))
-	}
-	sort.Slice(hashes, func(i, j int) bool { return hashes[i] < hashes[j] })
-	unique := make([]uint64, 0, min(len(hashes), maxFeatures))
-	for _, value := range hashes {
-		if len(unique) == 0 || unique[len(unique)-1] != value {
-			unique = append(unique, value)
-			if len(unique) >= maxFeatures {
-				break
+	// Keep only the smallest unique hashes. This preserves the old sorted-prefix
+	// result without allocating and sorting every overlapping n-gram.
+	hashes := &largestHashHeap{}
+	seen := make(map[uint64]struct{}, maxFeatures)
+	var window [featureNgram]rune
+	filled := 0
+	for _, r := range content {
+		copy(window[:], window[1:])
+		window[featureNgram-1] = r
+		if filled < featureNgram {
+			filled++
+			if filled < featureNgram {
+				continue
 			}
 		}
+		value := fnv64Runes(window[:])
+		if hashes.Len() == maxFeatures && value >= (*hashes)[0] {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		if hashes.Len() < maxFeatures {
+			heap.Push(hashes, value)
+			seen[value] = struct{}{}
+			continue
+		}
+		old := (*hashes)[0]
+		delete(seen, old)
+		(*hashes)[0] = value
+		heap.Fix(hashes, 0)
+		seen[value] = struct{}{}
 	}
+	if filled < featureNgram {
+		return nil
+	}
+	unique := []uint64(*hashes)
+	sort.Slice(unique, func(i, j int) bool { return unique[i] < unique[j] })
 	return unique
+}
+
+type largestHashHeap []uint64
+
+func (h largestHashHeap) Len() int           { return len(h) }
+func (h largestHashHeap) Less(i, j int) bool { return h[i] > h[j] }
+func (h largestHashHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *largestHashHeap) Push(value any)    { *h = append(*h, value.(uint64)) }
+func (h *largestHashHeap) Pop() any {
+	old := *h
+	n := len(old)
+	value := old[n-1]
+	*h = old[:n-1]
+	return value
 }
 
 func fnv64Runes(value []rune) uint64 {

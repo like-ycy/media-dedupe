@@ -3,6 +3,7 @@ package video
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -32,9 +33,15 @@ type probePayload struct {
 	} `json:"format"`
 }
 
+var ErrNoFrame = errors.New("no video frame at timestamp")
+
 // ProbeMetadata runs ffprobe and parses video metadata.
 func ProbeMetadata(path string) model.VideoMetadata {
-	ctx, cancel := context.WithTimeout(context.Background(), config.FFmpegTimeoutSeconds*time.Second)
+	return ProbeMetadataContext(context.Background(), path)
+}
+
+func ProbeMetadataContext(parent context.Context, path string) model.VideoMetadata {
+	ctx, cancel := context.WithTimeout(parent, config.FFmpegTimeoutSeconds*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, ffprobeBin(),
@@ -129,63 +136,103 @@ func BuildFrameTimestamps(durationMs int64, frameCount int) []int64 {
 
 // ExtractFrame writes a single JPEG frame at timestampMs.
 func ExtractFrame(path string, timestampMs int64, outPath string) error {
+	return ExtractFrameContext(context.Background(), path, timestampMs, outPath)
+}
+
+// ExtractFrameContext writes one frame using a fast input seek and honors cancellation.
+func ExtractFrameContext(parent context.Context, path string, timestampMs int64, outPath string) error {
+	if err := parent.Err(); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), config.FFmpegTimeoutSeconds*time.Second)
+	// A successful seek past the last frame can write nothing. Do not mistake an
+	// existing JPEG for output from this invocation.
+	if err := os.Remove(outPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(parent, config.FFmpegTimeoutSeconds*time.Second)
 	defer cancel()
 	sec := float64(timestampMs) / 1000.0
 	cmd := exec.CommandContext(ctx, ffmpegBin(),
 		"-y",
+		"-v", "error",
+		"-threads", strconv.Itoa(config.FFmpegThreads),
 		"-ss", fmt.Sprintf("%.3f", sec),
 		"-i", path,
+		"-map", "0:v:0",
+		"-an", "-sn", "-dn",
+		"-filter_threads", "1",
+		"-threads", strconv.Itoa(config.FFmpegThreads),
 		"-frames:v", "1",
+		"-pix_fmt", "yuvj420p",
 		"-q:v", "2",
 		outPath,
 	)
 	hideConsole(cmd)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("extract frame: %w", err)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		_ = os.Remove(outPath)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("extract frame: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	if _, err := os.Stat(outPath); err != nil {
+	if info, err := os.Stat(outPath); err != nil {
+		if os.IsNotExist(err) {
+			return ErrNoFrame
+		}
 		return fmt.Errorf("frame not written")
+	} else if !info.Mode().IsRegular() || info.Size() == 0 {
+		return fmt.Errorf("frame is not a nonempty regular file")
 	}
 	return nil
 }
 
-// FrameHashResult holds one frame hash outcome.
-type FrameHashResult struct {
-	Hash string
-	Skip bool
+const frameHashTypePrefix = "video_frame_phash_v2_"
+
+// FrameHashType returns the cache key for the current extraction algorithm and frame count.
+func FrameHashType(frameCount int) string {
+	return fmt.Sprintf("%s%d", frameHashTypePrefix, frameCount)
 }
 
 // ComputeFrameHashes extracts frames, skips blanks, returns pHashes.
 func ComputeFrameHashes(path string, meta model.VideoMetadata, frameCount int, failureLimit int, tmpDir string) ([]string, error) {
-	if meta.DurationMs <= 0 {
-		return nil, fmt.Errorf("invalid duration")
-	}
 	framePaths, err := ExtractFrames(path, meta, frameCount, tmpDir)
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		for _, path := range framePaths {
+			_ = os.Remove(path)
+		}
+	}()
+	return HashFrames(context.Background(), framePaths, failureLimit)
+}
+
+// HashFrames hashes the extracted images without removing them, so previews can reuse them.
+func HashFrames(ctx context.Context, framePaths []string, failureLimit int) ([]string, error) {
 	var hashes []string
 	failed := 0
 	for _, framePath := range framePaths {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if framePath == "" {
+			continue
+		}
 		img, err := imgutil.LoadImage(framePath)
 		if err != nil {
 			failed++
-			_ = os.Remove(framePath)
 			if failed >= failureLimit {
 				break
 			}
 			continue
 		}
 		if imgutil.IsBlankFrame(img) {
-			_ = os.Remove(framePath)
 			continue
 		}
 		hash, err := imgutil.PerceptualHash(img)
-		_ = os.Remove(framePath)
 		if err != nil {
 			failed++
 			if failed >= failureLimit {
@@ -201,8 +248,13 @@ func ComputeFrameHashes(path string, meta model.VideoMetadata, frameCount int, f
 	return hashes, nil
 }
 
-// ExtractFrames writes evenly spaced JPEG frames with one FFmpeg process.
+// ExtractFrames writes evenly spaced JPEG frames using independent fast seeks.
 func ExtractFrames(path string, meta model.VideoMetadata, frameCount int, tmpDir string) ([]string, error) {
+	return ExtractFramesContext(context.Background(), path, meta, frameCount, tmpDir)
+}
+
+// ExtractFramesContext preserves timestamp positions; empty entries mean no frame exists there.
+func ExtractFramesContext(parent context.Context, path string, meta model.VideoMetadata, frameCount int, tmpDir string) ([]string, error) {
 	if meta.DurationMs <= 0 || frameCount <= 0 {
 		return nil, fmt.Errorf("invalid frame extraction parameters")
 	}
@@ -213,29 +265,20 @@ func ExtractFrames(path string, meta model.VideoMetadata, frameCount int, tmpDir
 	if len(timestamps) == 0 {
 		return nil, fmt.Errorf("no frame timestamps")
 	}
-	args := []string{"-y", "-ss", fmt.Sprintf("%.3f", float64(timestamps[0])/1000), "-i", path}
-	if len(timestamps) > 1 {
-		span := float64(timestamps[len(timestamps)-1]-timestamps[0]) / 1000
-		fps := float64(len(timestamps)) / span
-		args = append(args, "-t", fmt.Sprintf("%.3f", span), "-vf", fmt.Sprintf("fps=%.6f", fps))
-	}
-	args = append(args, "-an", "-frames:v", strconv.Itoa(len(timestamps)), "-q:v", "2", filepath.Join(tmpDir, "frame-%03d.jpg"))
-	ctx, cancel := context.WithTimeout(context.Background(), config.FFmpegTimeoutSeconds*time.Second)
-	defer cancel()
-	fcmd := exec.CommandContext(ctx, ffmpegBin(), args...)
-	hideConsole(fcmd)
-	if err := fcmd.Run(); err != nil {
-		return nil, fmt.Errorf("extract frames: %w", err)
-	}
 	paths := make([]string, 0, len(timestamps))
-	for i := 1; i <= len(timestamps); i++ {
-		framePath := filepath.Join(tmpDir, fmt.Sprintf("frame-%03d.jpg", i))
-		if _, err := os.Stat(framePath); err == nil {
-			paths = append(paths, framePath)
+	for i, timestamp := range timestamps {
+		if err := parent.Err(); err != nil {
+			return nil, err
 		}
-	}
-	if len(paths) == 0 {
-		return nil, fmt.Errorf("no frames extracted")
+		framePath := filepath.Join(tmpDir, fmt.Sprintf("frame-%03d.jpg", i+1))
+		if err := ExtractFrameContext(parent, path, timestamp, framePath); err != nil {
+			if errors.Is(err, ErrNoFrame) {
+				paths = append(paths, "")
+				continue
+			}
+			return nil, fmt.Errorf("extract frame %d: %w", i+1, err)
+		}
+		paths = append(paths, framePath)
 	}
 	return paths, nil
 }

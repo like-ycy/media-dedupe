@@ -215,7 +215,27 @@ func (c *Cache) RecordError(scanRunID int64, path, stage, message string) error 
 }
 
 func (c *Cache) UpsertFile(d model.DiscoveredFile) (int64, error) {
-	_, err := c.db.Exec(`
+	tx, err := c.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var oldID, size, mtime int64
+	var status string
+	err = tx.QueryRow(`SELECT id, size_bytes, mtime_ns, status FROM files WHERE path = ?`, d.Path).Scan(&oldID, &size, &mtime, &status)
+	if err != nil && err != sql.ErrNoRows {
+		return 0, err
+	}
+	// Invalidate derived data before changing the fingerprint, even if extraction
+	// later fails or the scan is canceled. A retry must not reuse stale features.
+	if err == nil && (size != d.SizeBytes || mtime != d.MTimeNs || status != string(model.StatusActive)) {
+		for _, table := range []string{"file_hashes", "media_metadata", "perceptual_hashes", "text_facts", "frame_previews"} {
+			if _, err := tx.Exec(`DELETE FROM `+table+` WHERE file_id = ?`, oldID); err != nil {
+				return 0, err
+			}
+		}
+	}
+	_, err = tx.Exec(`
 INSERT INTO files (path, media_type, extension, size_bytes, mtime_ns, inode, device, status, last_seen_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 ON CONFLICT(path) DO UPDATE SET
@@ -232,8 +252,10 @@ ON CONFLICT(path) DO UPDATE SET
 		return 0, err
 	}
 	var id int64
-	err = c.db.QueryRow(`SELECT id FROM files WHERE path = ?`, d.Path).Scan(&id)
-	return id, err
+	if err := tx.QueryRow(`SELECT id FROM files WHERE path = ?`, d.Path).Scan(&id); err != nil {
+		return 0, err
+	}
+	return id, tx.Commit()
 }
 
 // IsUnchanged trusts size+mtime when status is active.
@@ -645,12 +667,21 @@ func (c *Cache) RecordDeleteOps(mode string, groupID int64, items []DeleteOpItem
 	return tx.Commit()
 }
 
-func (c *Cache) SaveFramePreview(fileID int64, frameIndex int, path string) error {
-	_, err := c.db.Exec(`
-INSERT INTO frame_previews (file_id, frame_index, path) VALUES (?, ?, ?)
-ON CONFLICT(file_id, frame_index) DO UPDATE SET path = excluded.path
-`, fileID, frameIndex, path)
-	return err
+func (c *Cache) ReplaceFramePreviews(fileID int64, paths []string) error {
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`DELETE FROM frame_previews WHERE file_id = ?`, fileID); err != nil {
+		return err
+	}
+	for index, path := range paths {
+		if _, err := tx.Exec(`INSERT INTO frame_previews (file_id, frame_index, path) VALUES (?, ?, ?)`, fileID, index, path); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (c *Cache) LoadFramePreviews(fileID int64) ([]string, error) {
