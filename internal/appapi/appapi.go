@@ -211,7 +211,12 @@ func (a *App) Startup(ctx context.Context) {
 		store, _ = project.Open(filepath.Join(os.TempDir(), "media-dedupe-app"))
 	}
 	a.store = store
-	a.media = mediastore.New()
+	// SetMediaBase already configured the store (and its base URL) before the
+	// Wails runtime starts; recreating it here would drop the base and make
+	// every preview URL resolve to "".
+	if a.media == nil {
+		a.media = mediastore.New()
+	}
 	_ = a.media.AllowRoot(filepath.Join(store.Root(), "projects"))
 	if st, err := store.LoadSettings(); err == nil {
 		video.ConfigureTools(st.FFmpegPath, st.FFprobePath)
@@ -886,7 +891,7 @@ func (a *App) GetGroup(projectID string, groupID int64) (GroupDetailDTO, error) 
 			Similarity:   it.Similarity,
 			QualityScore: it.QualityScore,
 			SizeBytes:    it.SizeBytes,
-			// Prefer inline JPEG data URLs so image thumbs always render in the Wails WebView.
+			// Original image via the local media server, with legacy thumb fallback.
 			ThumbURL:      a.resolveImageThumb(projectID, it.FileID, it.Path, it.ThumbPath),
 			IsRecommended: it.FileID == g.RecommendedFileID,
 			Reasons:       it.Reasons,

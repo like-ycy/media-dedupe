@@ -120,17 +120,11 @@ func OpenPath(path string) error {
 	if _, err := os.Lstat(path); err != nil {
 		return err
 	}
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("open", path)
-	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", path)
-	default:
-		cmd = exec.Command("xdg-open", path)
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
 	}
-	prepareCmd(cmd)
-	return cmd.Start()
+	return openPath(abs)
 }
 
 // RevealInFolder reveals path in Finder / Explorer.
