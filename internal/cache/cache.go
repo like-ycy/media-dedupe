@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -312,6 +313,47 @@ func (c *Cache) LoadFileHash(fileID int64) (string, bool, error) {
 		return "", false, nil
 	}
 	return full.String, true, nil
+}
+
+// quickHashVersion prefixes stored sampled fingerprints. Bump it whenever the
+// sampling parameters change so stale values are never compared with new ones.
+const quickHashVersion = "v1:"
+
+func (c *Cache) SaveQuickHash(fileID, sizeBytes int64, quickHash string) error {
+	_, err := c.db.Exec(`
+INSERT INTO file_hashes (file_id, size_bytes, quick_hash, hash_algorithm)
+VALUES (?, ?, ?, 'sha256-sampled')
+ON CONFLICT(file_id) DO UPDATE SET
+  size_bytes=excluded.size_bytes,
+  quick_hash=excluded.quick_hash,
+  hash_algorithm=CASE
+    WHEN COALESCE(file_hashes.full_hash, '') = '' THEN 'sha256-sampled'
+    ELSE file_hashes.hash_algorithm
+  END
+`, fileID, sizeBytes, quickHashVersion+quickHash)
+	return err
+}
+
+// LoadQuickHash returns the stored sampled fingerprint for an unchanged size.
+func (c *Cache) LoadQuickHash(fileID, sizeBytes int64) (string, bool, error) {
+	var quick sql.NullString
+	var storedSize int64
+	err := c.db.QueryRow(
+		`SELECT quick_hash, size_bytes FROM file_hashes WHERE file_id = ?`, fileID,
+	).Scan(&quick, &storedSize)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if !quick.Valid || quick.String == "" || storedSize != sizeBytes {
+		return "", false, nil
+	}
+	if !strings.HasPrefix(quick.String, quickHashVersion) {
+		return "", false, nil
+	}
+	return strings.TrimPrefix(quick.String, quickHashVersion), true, nil
 }
 
 // textFactVersion invalidates legacy JSON feature rows (v2 and earlier)

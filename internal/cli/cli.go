@@ -34,6 +34,8 @@ func NewRootCmd() *cobra.Command {
 		noText         bool
 		recursive      bool
 		thumbDir       string
+		videoMode      string
+		verifySampled  bool
 	)
 
 	root := &cobra.Command{
@@ -75,19 +77,21 @@ func NewRootCmd() *cobra.Command {
 			thumbDir = fsutil.ExpandPath(thumbDir)
 
 			opts := pipeline.Options{
-				Paths:         args,
-				CachePath:     cachePath,
-				ThumbDir:      thumbDir,
-				Threshold:     similarity,
-				Recursive:     recursive,
-				IncludeImages: includeImage,
-				IncludeVideos: includeVideo,
-				IncludeTexts:  includeText,
-				TextThreshold: textSimilarity,
-				TextWorkers:   textWorkers,
-				Workers:       workers,
-				VideoWorkers:  videoWorkers,
-				FrameCount:    frames,
+				Paths:             args,
+				CachePath:         cachePath,
+				ThumbDir:          thumbDir,
+				Threshold:         similarity,
+				Recursive:         recursive,
+				IncludeImages:     includeImage,
+				IncludeVideos:     includeVideo,
+				IncludeTexts:      includeText,
+				TextThreshold:     textSimilarity,
+				TextWorkers:       textWorkers,
+				Workers:           workers,
+				VideoWorkers:      videoWorkers,
+				FrameCount:        frames,
+				VideoCompareMode:  videoMode,
+				VerifySampledHash: verifySampled,
 				OnProgress: func(msg string) {
 					fmt.Fprintln(os.Stderr, "[media-dedupe]", msg)
 				},
@@ -134,6 +138,8 @@ func NewRootCmd() *cobra.Command {
 	scan.Flags().IntVar(&videoWorkers, "video-workers", config.DefaultVideoWorkers, "video frame extraction workers")
 	scan.Flags().IntVar(&textWorkers, "text-workers", config.DefaultTextWorkers, "text workers")
 	scan.Flags().IntVar(&frames, "frames", config.DefaultFrameCount, "video frames to sample")
+	scan.Flags().StringVar(&videoMode, "video-mode", config.DefaultVideoMode, "video compare mode: precise|simple (simple skips frame extraction)")
+	scan.Flags().BoolVar(&verifySampled, "verify-sampled-hash", false, "re-read full video content before confirming a sampled fingerprint match")
 	scan.Flags().Float64Var(&textSimilarity, "text-similarity", config.DefaultTextSimilarityThreshold, "text similarity threshold 0..1")
 	scan.Flags().StringVar(&output, "output", "", "output file or directory")
 	scan.Flags().StringVar(&format, "format", "html", "output format: text|json|html")

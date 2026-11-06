@@ -26,71 +26,76 @@ type LastSummary struct {
 }
 
 type Project struct {
-	ID            string      `json:"id"`
-	Name          string      `json:"name"`
-	CreatedAt     string      `json:"createdAt"`
-	UpdatedAt     string      `json:"updatedAt"`
-	Paths         []string    `json:"paths"`
-	Recursive     bool        `json:"recursive"`
-	Threshold     float64     `json:"threshold"`
-	IncludeImages bool        `json:"includeImages"`
-	IncludeVideos bool        `json:"includeVideos"`
-	IncludeTexts  bool        `json:"includeTexts"`
-	TextThreshold float64     `json:"textThreshold"`
-	TextWorkers   int         `json:"textWorkers"`
-	FrameCount    int         `json:"frameCount"`
-	Workers       int         `json:"workers"`
-	VideoWorkers  int         `json:"videoWorkers"`
-	EnableThumbs  bool        `json:"enableThumbs"`
-	LastScanAt    *string     `json:"lastScanAt"`
-	LastSummary   LastSummary `json:"lastSummary"`
+	ID               string      `json:"id"`
+	Name             string      `json:"name"`
+	CreatedAt        string      `json:"createdAt"`
+	UpdatedAt        string      `json:"updatedAt"`
+	Paths            []string    `json:"paths"`
+	Recursive        bool        `json:"recursive"`
+	Threshold        float64     `json:"threshold"`
+	IncludeImages    bool        `json:"includeImages"`
+	IncludeVideos    bool        `json:"includeVideos"`
+	IncludeTexts     bool        `json:"includeTexts"`
+	TextThreshold    float64     `json:"textThreshold"`
+	TextWorkers      int         `json:"textWorkers"`
+	FrameCount       int         `json:"frameCount"`
+	VideoCompareMode string      `json:"videoCompareMode"`
+	Workers          int         `json:"workers"`
+	VideoWorkers     int         `json:"videoWorkers"`
+	EnableThumbs     bool        `json:"enableThumbs"`
+	LastScanAt       *string     `json:"lastScanAt"`
+	LastSummary      LastSummary `json:"lastSummary"`
 }
 
 type Settings struct {
-	DefaultThreshold     float64 `json:"defaultThreshold"`
-	DefaultIncludeVideos bool    `json:"defaultIncludeVideos"`
-	DefaultIncludeTexts  bool    `json:"defaultIncludeTexts"`
-	DefaultTextThreshold float64 `json:"defaultTextThreshold"`
-	DefaultTextWorkers   int     `json:"defaultTextWorkers"`
-	DefaultFrameCount    int     `json:"defaultFrameCount"`
-	DefaultWorkers       int     `json:"defaultWorkers"`
-	DefaultVideoWorkers  int     `json:"defaultVideoWorkers"`
-	DefaultDeleteMode    string  `json:"defaultDeleteMode"`
-	AllowPermanentDelete bool    `json:"allowPermanentDelete"`
-	FFmpegPath           string  `json:"ffmpegPath"`
-	FFprobePath          string  `json:"ffprobePath"`
+	DefaultThreshold        float64 `json:"defaultThreshold"`
+	DefaultIncludeVideos    bool    `json:"defaultIncludeVideos"`
+	DefaultIncludeTexts     bool    `json:"defaultIncludeTexts"`
+	DefaultTextThreshold    float64 `json:"defaultTextThreshold"`
+	DefaultTextWorkers      int     `json:"defaultTextWorkers"`
+	DefaultFrameCount       int     `json:"defaultFrameCount"`
+	DefaultVideoCompareMode string  `json:"defaultVideoCompareMode"`
+	DefaultWorkers          int     `json:"defaultWorkers"`
+	DefaultVideoWorkers     int     `json:"defaultVideoWorkers"`
+	DefaultVerifySampled    bool    `json:"defaultVerifySampledHash"`
+	DefaultDeleteMode       string  `json:"defaultDeleteMode"`
+	AllowPermanentDelete    bool    `json:"allowPermanentDelete"`
+	FFmpegPath              string  `json:"ffmpegPath"`
+	FFprobePath             string  `json:"ffprobePath"`
 }
 
 type CreateInput struct {
-	Name          string   `json:"name"`
-	Paths         []string `json:"paths"`
-	Recursive     bool     `json:"recursive"`
-	Threshold     float64  `json:"threshold"`
-	IncludeImages bool     `json:"includeImages"`
-	IncludeVideos bool     `json:"includeVideos"`
-	IncludeTexts  bool     `json:"includeTexts"`
-	TextThreshold float64  `json:"textThreshold"`
-	TextWorkers   int      `json:"textWorkers"`
-	FrameCount    int      `json:"frameCount"`
-	Workers       int      `json:"workers"`
-	VideoWorkers  int      `json:"videoWorkers"`
-	EnableThumbs  bool     `json:"enableThumbs"`
+	Name             string   `json:"name"`
+	Paths            []string `json:"paths"`
+	Recursive        bool     `json:"recursive"`
+	Threshold        float64  `json:"threshold"`
+	IncludeImages    bool     `json:"includeImages"`
+	IncludeVideos    bool     `json:"includeVideos"`
+	IncludeTexts     bool     `json:"includeTexts"`
+	TextThreshold    float64  `json:"textThreshold"`
+	TextWorkers      int      `json:"textWorkers"`
+	FrameCount       int      `json:"frameCount"`
+	VideoCompareMode string   `json:"videoCompareMode"`
+	Workers          int      `json:"workers"`
+	VideoWorkers     int      `json:"videoWorkers"`
+	EnableThumbs     bool     `json:"enableThumbs"`
 }
 
 type UpdateInput struct {
-	Name          *string   `json:"name"`
-	Paths         *[]string `json:"paths"`
-	Recursive     *bool     `json:"recursive"`
-	Threshold     *float64  `json:"threshold"`
-	IncludeImages *bool     `json:"includeImages"`
-	IncludeVideos *bool     `json:"includeVideos"`
-	IncludeTexts  *bool     `json:"includeTexts"`
-	TextThreshold *float64  `json:"textThreshold"`
-	TextWorkers   *int      `json:"textWorkers"`
-	FrameCount    *int      `json:"frameCount"`
-	Workers       *int      `json:"workers"`
-	VideoWorkers  *int      `json:"videoWorkers"`
-	EnableThumbs  *bool     `json:"enableThumbs"`
+	Name             *string   `json:"name"`
+	Paths            *[]string `json:"paths"`
+	Recursive        *bool     `json:"recursive"`
+	Threshold        *float64  `json:"threshold"`
+	IncludeImages    *bool     `json:"includeImages"`
+	IncludeVideos    *bool     `json:"includeVideos"`
+	IncludeTexts     *bool     `json:"includeTexts"`
+	TextThreshold    *float64  `json:"textThreshold"`
+	TextWorkers      *int      `json:"textWorkers"`
+	FrameCount       *int      `json:"frameCount"`
+	VideoCompareMode *string   `json:"videoCompareMode"`
+	Workers          *int      `json:"workers"`
+	VideoWorkers     *int      `json:"videoWorkers"`
+	EnableThumbs     *bool     `json:"enableThumbs"`
 }
 
 type Store struct {
@@ -101,16 +106,18 @@ type Store struct {
 
 func DefaultSettings() Settings {
 	return Settings{
-		DefaultThreshold:     0.8,
-		DefaultIncludeVideos: true,
-		DefaultIncludeTexts:  true,
-		DefaultTextThreshold: 0.92,
-		DefaultTextWorkers:   config.DefaultTextWorkers,
-		DefaultFrameCount:    8,
-		DefaultWorkers:       config.DefaultWorkers,
-		DefaultVideoWorkers:  1,
-		DefaultDeleteMode:    "recycle",
-		AllowPermanentDelete: false,
+		DefaultThreshold:        0.8,
+		DefaultIncludeVideos:    true,
+		DefaultIncludeTexts:     true,
+		DefaultTextThreshold:    0.92,
+		DefaultTextWorkers:      config.DefaultTextWorkers,
+		DefaultFrameCount:       8,
+		DefaultVideoCompareMode: config.DefaultVideoMode,
+		DefaultWorkers:          config.DefaultWorkers,
+		DefaultVideoWorkers:     1,
+		DefaultVerifySampled:    false,
+		DefaultDeleteMode:       "recycle",
+		AllowPermanentDelete:    false,
 	}
 }
 
@@ -172,6 +179,7 @@ func (s *Store) load() error {
 	}
 	for _, p := range list {
 		if p != nil && p.ID != "" {
+			p.VideoCompareMode = config.NormalizeVideoMode(p.VideoCompareMode)
 			s.projects[p.ID] = p
 		}
 	}
@@ -234,22 +242,23 @@ func (s *Store) Create(in CreateInput) (Project, error) {
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	p := &Project{
-		ID:            newID(),
-		Name:          name,
-		CreatedAt:     now,
-		UpdatedAt:     now,
-		Paths:         append([]string(nil), in.Paths...),
-		Recursive:     in.Recursive,
-		Threshold:     in.Threshold,
-		IncludeImages: in.IncludeImages,
-		IncludeVideos: in.IncludeVideos,
-		IncludeTexts:  in.IncludeTexts,
-		TextThreshold: in.TextThreshold,
-		TextWorkers:   in.TextWorkers,
-		FrameCount:    in.FrameCount,
-		Workers:       in.Workers,
-		VideoWorkers:  in.VideoWorkers,
-		EnableThumbs:  true, // legacy field; scan no longer pre-generates thumbs
+		ID:               newID(),
+		Name:             name,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+		Paths:            append([]string(nil), in.Paths...),
+		Recursive:        in.Recursive,
+		Threshold:        in.Threshold,
+		IncludeImages:    in.IncludeImages,
+		IncludeVideos:    in.IncludeVideos,
+		IncludeTexts:     in.IncludeTexts,
+		TextThreshold:    in.TextThreshold,
+		TextWorkers:      in.TextWorkers,
+		FrameCount:       in.FrameCount,
+		VideoCompareMode: config.NormalizeVideoMode(in.VideoCompareMode),
+		Workers:          in.Workers,
+		VideoWorkers:     in.VideoWorkers,
+		EnableThumbs:     true, // legacy field; scan no longer pre-generates thumbs
 	}
 	if !p.IncludeImages && !p.IncludeVideos && !p.IncludeTexts {
 		p.IncludeImages = true
@@ -334,6 +343,9 @@ func (s *Store) Update(id string, in UpdateInput) (Project, error) {
 	if in.FrameCount != nil && *in.FrameCount > 0 {
 		p.FrameCount = *in.FrameCount
 	}
+	if in.VideoCompareMode != nil {
+		p.VideoCompareMode = config.NormalizeVideoMode(*in.VideoCompareMode)
+	}
 	if in.Workers != nil && *in.Workers > 0 {
 		p.Workers = *in.Workers
 	}
@@ -408,6 +420,7 @@ func (s *Store) LoadSettings() (Settings, error) {
 	if err := json.Unmarshal(b, &st); err != nil {
 		return DefaultSettings(), err
 	}
+	st.DefaultVideoCompareMode = config.NormalizeVideoMode(st.DefaultVideoCompareMode)
 	return st, nil
 }
 
@@ -420,6 +433,7 @@ func (s *Store) SaveSettings(st Settings) error {
 	if st.DefaultFrameCount < 1 {
 		st.DefaultFrameCount = 8
 	}
+	st.DefaultVideoCompareMode = config.NormalizeVideoMode(st.DefaultVideoCompareMode)
 	if st.DefaultWorkers < 1 {
 		st.DefaultWorkers = config.DefaultWorkers
 	}

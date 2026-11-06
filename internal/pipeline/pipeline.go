@@ -45,10 +45,17 @@ type Options struct {
 	Workers       int
 	VideoWorkers  int
 	FrameCount    int
-	OnProgress    func(msg string)
-	Ctx           context.Context
-	OnEvent       func(ev progress.Event)
-	ProjectID     string
+	// VideoCompareMode selects how videos are deduplicated: precise samples
+	// frames and compares perceptual hashes, simple only compares content
+	// fingerprints and never invokes FFmpeg.
+	VideoCompareMode string
+	// VerifySampledHash confirms sampled matches with full SHA-256, reusing
+	// valid cached hashes and reading only candidates without one.
+	VerifySampledHash bool
+	OnProgress        func(msg string)
+	Ctx               context.Context
+	OnEvent           func(ev progress.Event)
+	ProjectID         string
 }
 
 type Result struct {
@@ -110,6 +117,7 @@ func Scan(opts Options) (*Result, error) {
 	if opts.TextWorkers < 1 {
 		opts.TextWorkers = config.DefaultTextWorkers
 	}
+	opts.VideoCompareMode = config.NormalizeVideoMode(opts.VideoCompareMode)
 	ctx := opts.context()
 
 	startWall := time.Now()
@@ -132,6 +140,8 @@ func Scan(opts Options) (*Result, error) {
 		"workers":         opts.Workers,
 		"video_workers":   opts.VideoWorkers,
 		"frames":          opts.FrameCount,
+		"video_mode":      opts.VideoCompareMode,
+		"verify_sampled":  opts.VerifySampledHash,
 	})
 	if err != nil {
 		return nil, err
@@ -212,7 +222,7 @@ func Scan(opts Options) (*Result, error) {
 
 	emit(progress.Event{Stage: progress.StageExact, Phase: "running", Message: "SHA-256 精确哈希...", Percent: 15, FilesSeen: len(files), ProjectID: opts.ProjectID})
 	progressFn("exact duplicate pass...")
-	exactGroups, usedPaths := exactPass(ctx, c, files, infos, recordErr, opts.Workers, &exactCount, emit)
+	exactGroups, usedPaths := exactPass(ctx, c, files, infos, recordErr, opts, &exactCount)
 	if err := ctx.Err(); err != nil {
 		_ = c.FinishScanRun(scanRunID, len(files), len(reportErrs))
 		emit(progress.Event{Stage: progress.StageCanceled, Phase: "canceled", Message: "已取消，缓存已保留", FilesSeen: len(files), FoundExact: exactCount, ProjectID: opts.ProjectID})
@@ -236,7 +246,12 @@ func Scan(opts Options) (*Result, error) {
 	var similarVideoGroups []model.ReportGroup
 	if opts.IncludeVideos {
 		ffmpeg, _ := video.Available()
-		if !ffmpeg {
+		if opts.VideoCompareMode == config.VideoModeSimple {
+			// Videos were already deduplicated by content fingerprint in the
+			// exact pass; frame extraction would only add visual near-duplicate
+			// detection at the cost of one seek per sampled frame.
+			emit(progress.Event{Stage: progress.StageVideo, Phase: "skipped", Message: "简易模式：跳过视频抽帧，仅按内容指纹判重", Percent: 80, FilesSeen: len(files), FoundExact: exactCount, FoundSimilar: similarCount, ProjectID: opts.ProjectID})
+		} else if !ffmpeg {
 			emit(progress.Event{Stage: progress.StageVideo, Phase: "skipped", Message: "未检测到 FFmpeg，跳过视频抽帧", Percent: 65, FilesSeen: len(files), FoundExact: exactCount, FoundSimilar: similarCount, ProjectID: opts.ProjectID})
 		} else if err := ctx.Err(); err == nil {
 			emit(progress.Event{Stage: progress.StageVideo, Phase: "running", Message: "视频 FFmpeg 抽帧多帧 pHash...", Percent: 65, FilesSeen: len(files), FoundExact: exactCount, FoundSimilar: similarCount, ProjectID: opts.ProjectID})
@@ -375,21 +390,25 @@ func groupStableKey(g model.ReportGroup) string {
 	return hex.EncodeToString(h.Sum(nil))[:32]
 }
 
+type exactBucketKey struct {
+	size int64
+	ext  string
+}
+
+// sampledFingerprintConfidence is used for byte-identity claims that were not
+// confirmed by a full read.
+const sampledFingerprintConfidence = 0.99
+
 func exactPass(
 	ctx context.Context,
 	c *cache.Cache,
 	files []model.DiscoveredFile,
 	infos []fileCacheInfo,
 	recordErr func(path, stage, message string),
-	workers int,
+	opts Options,
 	exactCount *int,
-	emit func(progress.Event),
 ) ([]model.ReportGroup, map[string]struct{}) {
 	used := map[string]struct{}{}
-	type exactBucketKey struct {
-		size int64
-		ext  string
-	}
 	sizeBuckets := map[exactBucketKey][]int{}
 	for i, f := range files {
 		if infos[i].fileID == 0 {
@@ -399,16 +418,34 @@ func exactPass(
 		sizeBuckets[key] = append(sizeBuckets[key], i)
 	}
 
+	// Exact matching is restricted to files sharing size and extension; other
+	// files are never opened in this pass.
+	candidate := make([]bool, len(files))
+	candidates := 0
+	for _, idxs := range sizeBuckets {
+		if len(idxs) < 2 {
+			continue
+		}
+		for _, idx := range idxs {
+			candidate[idx] = true
+			candidates++
+		}
+	}
+	if candidates == 0 {
+		return nil, used
+	}
+
+	fullHashes := make([]string, len(files))
+	quickHashes := make([]string, len(files))
+
 	// Schedule candidates in discovery order to retain directory locality on HDDs.
-	hashes := make([]string, len(files))
 	g := errgroup.Group{}
-	g.SetLimit(workers)
-	for idx, f := range files {
+	g.SetLimit(opts.Workers)
+	for idx := range files {
 		if ctx.Err() != nil {
 			break
 		}
-		key := exactBucketKey{size: f.SizeBytes, ext: strings.ToLower(f.Extension)}
-		if infos[idx].fileID == 0 || len(sizeBuckets[key]) < 2 {
+		if !candidate[idx] {
 			continue
 		}
 		g.Go(func() error {
@@ -417,23 +454,39 @@ func exactPass(
 			}
 			f := files[idx]
 			fileID := infos[idx].fileID
-			if infos[idx].unchanged {
-				if h, ok, err := c.LoadFileHash(fileID); err == nil && ok {
-					hashes[idx] = h
+			// Small files are cheaper to read fully than to fingerprint twice.
+			if f.SizeBytes < config.QuickTierMinSize {
+				h, err := fullHashFor(c, f, fileID, infos[idx].unchanged)
+				if err != nil {
+					recordErr(f.Path, "file_hash", err.Error())
 					return nil
 				}
+				fullHashes[idx] = h
+				return nil
 			}
-			h, err := hashfile.SHA256File(f.Path)
+			if infos[idx].unchanged {
+				h, ok, err := c.LoadFileHash(fileID)
+				if err != nil {
+					recordErr(f.Path, "file_hash", err.Error())
+					return nil
+				}
+				if ok {
+					fullHashes[idx] = h
+				}
+			}
+			h, err := quickHashFor(c, f, fileID, infos[idx].unchanged)
 			if err != nil {
 				recordErr(f.Path, "file_hash", err.Error())
 				return nil
 			}
-			_ = c.SaveFileHash(fileID, f.SizeBytes, h)
-			hashes[idx] = h
+			quickHashes[idx] = h
 			return nil
 		})
 	}
 	_ = g.Wait()
+	if ctx.Err() != nil {
+		return nil, used
+	}
 
 	var groups []model.ReportGroup
 	for _, idxs := range sizeBuckets {
@@ -443,51 +496,167 @@ func exactPass(
 		if len(idxs) < 2 {
 			continue
 		}
-		byHash := map[string][]int{}
-		for _, idx := range idxs {
-			h := hashes[idx]
-			if h == "" {
-				continue
+		if files[idxs[0]].SizeBytes < config.QuickTierMinSize {
+			for _, members := range groupIndices(func(i int) string { return fullHashes[i] }, idxs) {
+				if ctx.Err() != nil {
+					return groups, used
+				}
+				if group := buildExactGroup(ctx, c, files, infos, members, 1.0, "identical SHA-256 file hash", used, recordErr); group != nil {
+					groups = append(groups, *group)
+					*exactCount++
+				}
 			}
-			byHash[h] = append(byHash[h], idx)
+			continue
 		}
-		for _, members := range byHash {
+		for _, members := range groupIndices(func(i int) string { return quickHashes[i] }, idxs) {
+			if ctx.Err() != nil {
+				return groups, used
+			}
 			if len(members) < 2 {
 				continue
 			}
-			quality := map[int64]float64{}
-			for _, idx := range members {
-				f := files[idx]
-				fileID := infos[idx].fileID
-				used[f.Path] = struct{}{}
-				q := qualityFor(ctx, c, f, fileID, infos[idx].unchanged, recordErr)
-				quality[fileID] = q
+			known := groupIndices(func(i int) string { return fullHashes[i] }, members)
+			knownCount := 0
+			for _, cached := range known {
+				knownCount += len(cached)
 			}
-			actions := score.ChooseActions(quality, -1.0)
-			winner := score.Winner(quality)
-			var items []model.ReportItem
-			for _, idx := range members {
-				fileID := infos[idx].fileID
-				items = append(items, model.ReportItem{
-					FileID:       fileID,
-					Path:         files[idx].Path,
-					Action:       actions[fileID],
-					Similarity:   1.0,
-					QualityScore: quality[fileID],
-					SizeBytes:    files[idx].SizeBytes,
-					Reasons:      []string{"identical SHA-256 file hash"},
-				})
+			// Conflicting full hashes prove a sample collision. Verify any new
+			// members as well so they cannot bridge known-different files.
+			verify := needsFullVerification(files[members[0]], opts) || len(known) > 1
+			if !verify && knownCount < len(members) {
+				if group := buildExactGroup(ctx, c, files, infos, members, sampledFingerprintConfidence, "identical sampled content fingerprint (size + head/mid/tail)", used, recordErr); group != nil {
+					groups = append(groups, *group)
+					*exactCount++
+				}
+				continue
 			}
-			groups = append(groups, model.ReportGroup{
-				GroupType:         model.GroupExact,
-				Confidence:        1.0,
-				RecommendedFileID: winner,
-				Items:             items,
-			})
-			*exactCount++
+			// Reuse full hashes already loaded; read only the missing candidates.
+			for _, idx := range members {
+				if ctx.Err() != nil {
+					return groups, used
+				}
+				if fullHashes[idx] != "" {
+					continue
+				}
+				h, err := fullHashFor(c, files[idx], infos[idx].fileID, false)
+				if err != nil {
+					recordErr(files[idx].Path, "file_hash", err.Error())
+					continue
+				}
+				fullHashes[idx] = h
+			}
+			for _, confirmed := range groupIndices(func(i int) string { return fullHashes[i] }, members) {
+				if ctx.Err() != nil {
+					return groups, used
+				}
+				if group := buildExactGroup(ctx, c, files, infos, confirmed, 1.0, "identical SHA-256 file hash", used, recordErr); group != nil {
+					groups = append(groups, *group)
+					*exactCount++
+				}
+			}
 		}
 	}
 	return groups, used
+}
+
+// needsFullVerification reports whether a sampled fingerprint match must be
+// confirmed by reading both files fully.
+func needsFullVerification(f model.DiscoveredFile, opts Options) bool {
+	if opts.VerifySampledHash {
+		return true
+	}
+	// Simple video mode deliberately trades the full read for speed: videos are
+	// exactly what makes a full-library verification scan unaffordable.
+	return !(f.MediaType == model.MediaVideo && opts.VideoCompareMode == config.VideoModeSimple)
+}
+
+// groupIndices buckets candidate indices by their identity hash, dropping
+// entries whose hash could not be computed.
+func groupIndices(hashAt func(int) string, idxs []int) map[string][]int {
+	byHash := make(map[string][]int, len(idxs))
+	for _, idx := range idxs {
+		h := hashAt(idx)
+		if h == "" {
+			continue
+		}
+		byHash[h] = append(byHash[h], idx)
+	}
+	return byHash
+}
+
+func buildExactGroup(
+	ctx context.Context,
+	c *cache.Cache,
+	files []model.DiscoveredFile,
+	infos []fileCacheInfo,
+	members []int,
+	confidence float64,
+	reason string,
+	used map[string]struct{},
+	recordErr func(path, stage, message string),
+) *model.ReportGroup {
+	if len(members) < 2 {
+		return nil
+	}
+	quality := map[int64]float64{}
+	for _, idx := range members {
+		if ctx.Err() != nil {
+			return nil
+		}
+		f := files[idx]
+		fileID := infos[idx].fileID
+		used[f.Path] = struct{}{}
+		quality[fileID] = qualityFor(ctx, c, f, fileID, infos[idx].unchanged, recordErr)
+	}
+	actions := score.ChooseActions(quality, -1.0)
+	winner := score.Winner(quality)
+	items := make([]model.ReportItem, 0, len(members))
+	for _, idx := range members {
+		fileID := infos[idx].fileID
+		items = append(items, model.ReportItem{
+			FileID:       fileID,
+			Path:         files[idx].Path,
+			Action:       actions[fileID],
+			Similarity:   confidence,
+			QualityScore: quality[fileID],
+			SizeBytes:    files[idx].SizeBytes,
+			Reasons:      []string{reason},
+		})
+	}
+	return &model.ReportGroup{
+		GroupType:         model.GroupExact,
+		Confidence:        confidence,
+		RecommendedFileID: winner,
+		Items:             items,
+	}
+}
+
+func fullHashFor(c *cache.Cache, f model.DiscoveredFile, fileID int64, unchanged bool) (string, error) {
+	if unchanged {
+		if h, ok, err := c.LoadFileHash(fileID); err == nil && ok {
+			return h, nil
+		}
+	}
+	h, err := hashfile.SHA256File(f.Path)
+	if err != nil {
+		return "", err
+	}
+	_ = c.SaveFileHash(fileID, f.SizeBytes, h)
+	return h, nil
+}
+
+func quickHashFor(c *cache.Cache, f model.DiscoveredFile, fileID int64, unchanged bool) (string, error) {
+	if unchanged {
+		if h, ok, err := c.LoadQuickHash(fileID, f.SizeBytes); err == nil && ok {
+			return h, nil
+		}
+	}
+	h, err := hashfile.SampleHashFile(f.Path, f.SizeBytes, config.DefaultSampleSegmentBytes)
+	if err != nil {
+		return "", err
+	}
+	_ = c.SaveQuickHash(fileID, f.SizeBytes, h)
+	return h, nil
 }
 
 func qualityFor(

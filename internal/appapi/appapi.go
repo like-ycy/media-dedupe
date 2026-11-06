@@ -60,26 +60,27 @@ type AppInfo struct {
 }
 
 type ProjectDTO struct {
-	ID            string              `json:"id"`
-	Name          string              `json:"name"`
-	CreatedAt     string              `json:"createdAt"`
-	UpdatedAt     string              `json:"updatedAt"`
-	Paths         []string            `json:"paths"`
-	Recursive     bool                `json:"recursive"`
-	Threshold     float64             `json:"threshold"`
-	IncludeImages bool                `json:"includeImages"`
-	IncludeVideos bool                `json:"includeVideos"`
-	IncludeTexts  bool                `json:"includeTexts"`
-	TextThreshold float64             `json:"textThreshold"`
-	TextWorkers   int                 `json:"textWorkers"`
-	FrameCount    int                 `json:"frameCount"`
-	Workers       int                 `json:"workers"`
-	VideoWorkers  int                 `json:"videoWorkers"`
-	EnableThumbs  bool                `json:"enableThumbs"`
-	LastScanAt    *string             `json:"lastScanAt"`
-	LastSummary   project.LastSummary `json:"lastSummary"`
-	Scanning      bool                `json:"scanning"`
-	FFmpegReady   bool                `json:"ffmpegReady"`
+	ID               string              `json:"id"`
+	Name             string              `json:"name"`
+	CreatedAt        string              `json:"createdAt"`
+	UpdatedAt        string              `json:"updatedAt"`
+	Paths            []string            `json:"paths"`
+	Recursive        bool                `json:"recursive"`
+	Threshold        float64             `json:"threshold"`
+	IncludeImages    bool                `json:"includeImages"`
+	IncludeVideos    bool                `json:"includeVideos"`
+	IncludeTexts     bool                `json:"includeTexts"`
+	TextThreshold    float64             `json:"textThreshold"`
+	TextWorkers      int                 `json:"textWorkers"`
+	FrameCount       int                 `json:"frameCount"`
+	VideoCompareMode string              `json:"videoCompareMode"`
+	Workers          int                 `json:"workers"`
+	VideoWorkers     int                 `json:"videoWorkers"`
+	EnableThumbs     bool                `json:"enableThumbs"`
+	LastScanAt       *string             `json:"lastScanAt"`
+	LastSummary      project.LastSummary `json:"lastSummary"`
+	Scanning         bool                `json:"scanning"`
+	FFmpegReady      bool                `json:"ffmpegReady"`
 }
 
 type PathStatus struct {
@@ -148,20 +149,22 @@ type GroupDetailDTO struct {
 }
 
 type SettingsDTO struct {
-	DefaultThreshold     float64 `json:"defaultThreshold"`
-	DefaultIncludeVideos bool    `json:"defaultIncludeVideos"`
-	DefaultIncludeTexts  bool    `json:"defaultIncludeTexts"`
-	DefaultTextThreshold float64 `json:"defaultTextThreshold"`
-	DefaultTextWorkers   int     `json:"defaultTextWorkers"`
-	DefaultFrameCount    int     `json:"defaultFrameCount"`
-	DefaultWorkers       int     `json:"defaultWorkers"`
-	DefaultVideoWorkers  int     `json:"defaultVideoWorkers"`
-	DefaultDeleteMode    string  `json:"defaultDeleteMode"`
-	AllowPermanentDelete bool    `json:"allowPermanentDelete"`
-	FFmpegPath           string  `json:"ffmpegPath"`
-	FFprobePath          string  `json:"ffprobePath"`
-	FFmpegAvailable      bool    `json:"ffmpegAvailable"`
-	FFprobeAvailable     bool    `json:"ffprobeAvailable"`
+	DefaultThreshold         float64 `json:"defaultThreshold"`
+	DefaultIncludeVideos     bool    `json:"defaultIncludeVideos"`
+	DefaultIncludeTexts      bool    `json:"defaultIncludeTexts"`
+	DefaultTextThreshold     float64 `json:"defaultTextThreshold"`
+	DefaultTextWorkers       int     `json:"defaultTextWorkers"`
+	DefaultFrameCount        int     `json:"defaultFrameCount"`
+	DefaultVideoCompareMode  string  `json:"defaultVideoCompareMode"`
+	DefaultWorkers           int     `json:"defaultWorkers"`
+	DefaultVideoWorkers      int     `json:"defaultVideoWorkers"`
+	DefaultVerifySampledHash bool    `json:"defaultVerifySampledHash"`
+	DefaultDeleteMode        string  `json:"defaultDeleteMode"`
+	AllowPermanentDelete     bool    `json:"allowPermanentDelete"`
+	FFmpegPath               string  `json:"ffmpegPath"`
+	FFprobePath              string  `json:"ffprobePath"`
+	FFmpegAvailable          bool    `json:"ffmpegAvailable"`
+	FFprobeAvailable         bool    `json:"ffprobeAvailable"`
 }
 
 type DeleteRequestDTO struct {
@@ -289,14 +292,15 @@ func (a *App) toProjectDTO(p project.Project) ProjectDTO {
 		IncludeImages: p.IncludeImages,
 		IncludeVideos: p.IncludeVideos,
 		IncludeTexts:  p.IncludeTexts, TextThreshold: p.TextThreshold, TextWorkers: p.TextWorkers,
-		FrameCount:   p.FrameCount,
-		Workers:      p.Workers,
-		VideoWorkers: p.VideoWorkers,
-		EnableThumbs: p.EnableThumbs,
-		LastScanAt:   p.LastScanAt,
-		LastSummary:  p.LastSummary,
-		Scanning:     scanning,
-		FFmpegReady:  ffmpeg,
+		FrameCount:       p.FrameCount,
+		VideoCompareMode: p.VideoCompareMode,
+		Workers:          p.Workers,
+		VideoWorkers:     p.VideoWorkers,
+		EnableThumbs:     p.EnableThumbs,
+		LastScanAt:       p.LastScanAt,
+		LastSummary:      p.LastSummary,
+		Scanning:         scanning,
+		FFmpegReady:      ffmpeg,
 	}
 }
 
@@ -327,6 +331,9 @@ func (a *App) CreateProject(input project.CreateInput) (ProjectDTO, error) {
 	}
 	if input.FrameCount <= 0 {
 		input.FrameCount = st.DefaultFrameCount
+	}
+	if input.VideoCompareMode == "" {
+		input.VideoCompareMode = st.DefaultVideoCompareMode
 	}
 	if input.Workers <= 0 {
 		input.Workers = st.DefaultWorkers
@@ -441,37 +448,41 @@ func (a *App) GetSettings() (SettingsDTO, error) {
 	}
 	ffmpeg, ffprobe := video.Available()
 	return SettingsDTO{
-		DefaultThreshold:     st.DefaultThreshold,
-		DefaultIncludeVideos: st.DefaultIncludeVideos,
-		DefaultIncludeTexts:  st.DefaultIncludeTexts,
-		DefaultTextThreshold: st.DefaultTextThreshold,
-		DefaultTextWorkers:   st.DefaultTextWorkers,
-		DefaultFrameCount:    st.DefaultFrameCount,
-		DefaultWorkers:       st.DefaultWorkers,
-		DefaultVideoWorkers:  st.DefaultVideoWorkers,
-		DefaultDeleteMode:    st.DefaultDeleteMode,
-		AllowPermanentDelete: st.AllowPermanentDelete,
-		FFmpegPath:           st.FFmpegPath,
-		FFprobePath:          st.FFprobePath,
-		FFmpegAvailable:      ffmpeg,
-		FFprobeAvailable:     ffprobe,
+		DefaultThreshold:         st.DefaultThreshold,
+		DefaultIncludeVideos:     st.DefaultIncludeVideos,
+		DefaultIncludeTexts:      st.DefaultIncludeTexts,
+		DefaultTextThreshold:     st.DefaultTextThreshold,
+		DefaultTextWorkers:       st.DefaultTextWorkers,
+		DefaultFrameCount:        st.DefaultFrameCount,
+		DefaultVideoCompareMode:  st.DefaultVideoCompareMode,
+		DefaultWorkers:           st.DefaultWorkers,
+		DefaultVideoWorkers:      st.DefaultVideoWorkers,
+		DefaultVerifySampledHash: st.DefaultVerifySampled,
+		DefaultDeleteMode:        st.DefaultDeleteMode,
+		AllowPermanentDelete:     st.AllowPermanentDelete,
+		FFmpegPath:               st.FFmpegPath,
+		FFprobePath:              st.FFprobePath,
+		FFmpegAvailable:          ffmpeg,
+		FFprobeAvailable:         ffprobe,
 	}, nil
 }
 
 func (a *App) SaveSettings(dto SettingsDTO) error {
 	st := project.Settings{
-		DefaultThreshold:     dto.DefaultThreshold,
-		DefaultIncludeVideos: dto.DefaultIncludeVideos,
-		DefaultIncludeTexts:  dto.DefaultIncludeTexts,
-		DefaultTextThreshold: dto.DefaultTextThreshold,
-		DefaultTextWorkers:   dto.DefaultTextWorkers,
-		DefaultFrameCount:    dto.DefaultFrameCount,
-		DefaultWorkers:       dto.DefaultWorkers,
-		DefaultVideoWorkers:  dto.DefaultVideoWorkers,
-		DefaultDeleteMode:    dto.DefaultDeleteMode,
-		AllowPermanentDelete: dto.AllowPermanentDelete,
-		FFmpegPath:           dto.FFmpegPath,
-		FFprobePath:          dto.FFprobePath,
+		DefaultThreshold:        dto.DefaultThreshold,
+		DefaultIncludeVideos:    dto.DefaultIncludeVideos,
+		DefaultIncludeTexts:     dto.DefaultIncludeTexts,
+		DefaultTextThreshold:    dto.DefaultTextThreshold,
+		DefaultTextWorkers:      dto.DefaultTextWorkers,
+		DefaultFrameCount:       dto.DefaultFrameCount,
+		DefaultVideoCompareMode: dto.DefaultVideoCompareMode,
+		DefaultWorkers:          dto.DefaultWorkers,
+		DefaultVideoWorkers:     dto.DefaultVideoWorkers,
+		DefaultVerifySampled:    dto.DefaultVerifySampledHash,
+		DefaultDeleteMode:       dto.DefaultDeleteMode,
+		AllowPermanentDelete:    dto.AllowPermanentDelete,
+		FFmpegPath:              dto.FFmpegPath,
+		FFprobePath:             dto.FFprobePath,
 	}
 	if err := a.store.SaveSettings(st); err != nil {
 		return err
@@ -484,6 +495,10 @@ func (a *App) StartScan(projectID string) error {
 	p, ok := a.store.Get(projectID)
 	if !ok {
 		return errors.New("项目不存在")
+	}
+	settings, err := a.store.LoadSettings()
+	if err != nil {
+		return fmt.Errorf("读取扫描设置失败: %w", err)
 	}
 	a.mu.Lock()
 	if st, exists := a.scans[projectID]; exists && st.status.Running {
@@ -506,11 +521,11 @@ func (a *App) StartScan(projectID string) error {
 	if len(p.Paths) > 0 {
 		_ = a.touchRecent(p.Paths[0])
 	}
-	go a.runScan(ctx, p, st)
+	go a.runScan(ctx, p, st, settings.DefaultVerifySampled)
 	return nil
 }
 
-func (a *App) runScan(ctx context.Context, p project.Project, st *scanState) {
+func (a *App) runScan(ctx context.Context, p project.Project, st *scanState, verifySampledHash bool) {
 	defer close(st.done)
 	start := time.Now()
 
@@ -518,22 +533,24 @@ func (a *App) runScan(ctx context.Context, p project.Project, st *scanState) {
 	_ = a.media.AllowRoot(a.store.FrameDir(p.ID))
 
 	opts := pipeline.Options{
-		Paths:         p.Paths,
-		CachePath:     a.store.CachePath(p.ID),
-		ThumbDir:      a.store.ThumbDir(p.ID),
-		FrameDir:      a.store.FrameDir(p.ID),
-		Threshold:     p.Threshold,
-		Recursive:     p.Recursive,
-		IncludeImages: p.IncludeImages,
-		IncludeVideos: p.IncludeVideos,
-		IncludeTexts:  p.IncludeTexts,
-		TextThreshold: p.TextThreshold,
-		TextWorkers:   p.TextWorkers,
-		Workers:       p.Workers,
-		VideoWorkers:  p.VideoWorkers,
-		FrameCount:    p.FrameCount,
-		Ctx:           ctx,
-		ProjectID:     p.ID,
+		Paths:             p.Paths,
+		CachePath:         a.store.CachePath(p.ID),
+		ThumbDir:          a.store.ThumbDir(p.ID),
+		FrameDir:          a.store.FrameDir(p.ID),
+		Threshold:         p.Threshold,
+		Recursive:         p.Recursive,
+		IncludeImages:     p.IncludeImages,
+		IncludeVideos:     p.IncludeVideos,
+		IncludeTexts:      p.IncludeTexts,
+		TextThreshold:     p.TextThreshold,
+		TextWorkers:       p.TextWorkers,
+		Workers:           p.Workers,
+		VideoWorkers:      p.VideoWorkers,
+		FrameCount:        p.FrameCount,
+		VideoCompareMode:  p.VideoCompareMode,
+		VerifySampledHash: verifySampledHash,
+		Ctx:               ctx,
+		ProjectID:         p.ID,
 		OnEvent: func(ev progress.Event) {
 			a.mu.Lock()
 			st.status.Event = &ev

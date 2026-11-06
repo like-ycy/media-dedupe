@@ -2,6 +2,7 @@ package hashfile
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -19,6 +20,58 @@ func SHA256File(path string) (string, error) {
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return "", fmt.Errorf("hash %s: %w", path, err)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// SampleHashFile fingerprints a file from its size plus three evenly spaced
+// segments (head, middle, tail), so large media on slow drives can be compared
+// without a full read. Only fingerprints with the same sampling parameters and
+// format version are comparable.
+func SampleHashFile(path string, sizeBytes int64, segmentBytes int) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	size := info.Size()
+	if sizeBytes > 0 && sizeBytes != size {
+		return "", fmt.Errorf("sample hash: file size changed (%d != %d)", size, sizeBytes)
+	}
+	if segmentBytes <= 0 {
+		segmentBytes = 1 << 20
+	}
+
+	h := sha256.New()
+	var header [8]byte
+	binary.LittleEndian.PutUint64(header[:], uint64(size))
+	h.Write(header[:])
+
+	segment := int64(segmentBytes)
+	if size <= segment*3 {
+		// Small files are already covered by the sample window.
+		if _, err := io.Copy(h, f); err != nil {
+			return "", fmt.Errorf("sample hash %s: %w", path, err)
+		}
+		return hex.EncodeToString(h.Sum(nil)), nil
+	}
+
+	offsets := []int64{0, (size - segment) / 2, size - segment}
+	buf := make([]byte, segment)
+	for _, offset := range offsets {
+		var encoded [8]byte
+		binary.LittleEndian.PutUint64(encoded[:], uint64(offset))
+		h.Write(encoded[:])
+		n, readErr := f.ReadAt(buf, offset)
+		if readErr != nil {
+			return "", fmt.Errorf("sample hash %s: %w", path, readErr)
+		}
+		h.Write(buf[:n])
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
