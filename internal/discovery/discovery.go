@@ -12,7 +12,7 @@ import (
 	"media-dedupe/internal/model"
 )
 
-type ErrorHandler func(path, stage, message string)
+type ErrorHandler func(path, stage string, err error)
 
 // Discover walks paths and returns media files sorted by directory for HDD locality.
 func Discover(paths []string, recursive bool, onError ErrorHandler) []model.DiscoveredFile {
@@ -23,7 +23,7 @@ func Discover(paths []string, recursive bool, onError ErrorHandler) []model.Disc
 		root := fsutil.ExpandPath(raw)
 		info, err := os.Stat(root)
 		if err != nil {
-			record(onError, root, "discovery", err.Error())
+			record(onError, root, "discovery", err)
 			continue
 		}
 		if info.Mode().IsRegular() {
@@ -40,7 +40,7 @@ func Discover(paths []string, recursive bool, onError ErrorHandler) []model.Disc
 		} else {
 			entries, err := os.ReadDir(root)
 			if err != nil {
-				record(onError, root, "discovery", err.Error())
+				record(onError, root, "discovery", err)
 				continue
 			}
 			for _, entry := range entries {
@@ -69,7 +69,7 @@ func walkDir(root string, seen map[string]struct{}, onError ErrorHandler) []mode
 	var found []model.DiscoveredFile
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			record(onError, path, "discovery", err.Error())
+			record(onError, path, "discovery", err)
 			if d != nil && d.IsDir() {
 				return fs.SkipDir
 			}
@@ -125,7 +125,7 @@ func collectFile(path string, seen map[string]struct{}, onError ErrorHandler) (m
 
 	size, mtimeNs, inode, device, err := fsutil.SafeStat(path)
 	if err != nil {
-		record(onError, path, "discovery", err.Error())
+		record(onError, path, "discovery", err)
 		return model.DiscoveredFile{}, false
 	}
 	return model.DiscoveredFile{
@@ -160,8 +160,8 @@ func SupportsPHash(ext string) bool {
 	return !skipped
 }
 
-func record(handler ErrorHandler, path, stage, message string) {
+func record(handler ErrorHandler, path, stage string, err error) {
 	if handler != nil {
-		handler(path, stage, message)
+		handler(path, stage, err)
 	}
 }

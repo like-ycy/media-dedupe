@@ -106,9 +106,9 @@ type Store struct {
 
 func DefaultSettings() Settings {
 	return Settings{
-		DefaultThreshold:        0.8,
+		DefaultThreshold:        config.DefaultSimilarityThreshold,
 		DefaultIncludeVideos:    true,
-		DefaultIncludeTexts:     true,
+		DefaultIncludeTexts:     false,
 		DefaultTextThreshold:    0.92,
 		DefaultTextWorkers:      config.DefaultTextWorkers,
 		DefaultFrameCount:       8,
@@ -264,7 +264,7 @@ func (s *Store) Create(in CreateInput) (Project, error) {
 		p.IncludeImages = true
 	}
 	if p.Threshold <= 0 {
-		p.Threshold = 0.8
+		p.Threshold = config.DefaultSimilarityThreshold
 	}
 	if p.FrameCount < 1 {
 		p.FrameCount = 8
@@ -428,7 +428,7 @@ func (s *Store) SaveSettings(st Settings) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if st.DefaultThreshold <= 0 {
-		st.DefaultThreshold = 0.8
+		st.DefaultThreshold = config.DefaultSimilarityThreshold
 	}
 	if st.DefaultFrameCount < 1 {
 		st.DefaultFrameCount = 8

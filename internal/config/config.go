@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	DefaultSimilarityThreshold     = 0.80
+	DefaultSimilarityThreshold     = 0.95
 	DefaultWorkers                 = 1
 	DefaultVideoWorkers            = 1
 	DefaultFrameCount              = 8
@@ -24,8 +24,9 @@ const (
 	// VideoModeSimple skips frame extraction entirely: videos are deduplicated by
 	// content fingerprint only (byte-identical copies).
 	VideoModeSimple = "simple"
-	// DefaultVideoMode keeps the previous behaviour for existing projects.
-	DefaultVideoMode = VideoModePrecise
+	// DefaultVideoMode prefers the fast fingerprint-only path. Projects can
+	// switch back to precise frame sampling when re-encoded copies matter.
+	DefaultVideoMode = VideoModeSimple
 
 	// DefaultSampleSegmentBytes is the size of each sampled content segment used
 	// by the quick fingerprint (head, middle, tail).

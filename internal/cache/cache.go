@@ -215,6 +215,37 @@ func (c *Cache) RecordError(scanRunID int64, path, stage, message string) error 
 	return err
 }
 
+// DeleteFilesByPaths removes file rows for paths a scan could not process.
+// Derived tables cascade; frame previews have no foreign key and are removed
+// explicitly.
+func (c *Cache) DeleteFilesByPaths(paths []string) (int, error) {
+	if len(paths) == 0 {
+		return 0, nil
+	}
+	tx, err := c.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	deleted := 0
+	for _, path := range paths {
+		if _, err := tx.Exec(`DELETE FROM frame_previews WHERE file_id IN (SELECT id FROM files WHERE path = ?)`, path); err != nil {
+			return deleted, err
+		}
+		res, err := tx.Exec(`DELETE FROM files WHERE path = ?`, path)
+		if err != nil {
+			return deleted, err
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			deleted += int(n)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return deleted, err
+	}
+	return deleted, nil
+}
+
 func (c *Cache) UpsertFile(d model.DiscoveredFile) (int64, error) {
 	tx, err := c.db.Begin()
 	if err != nil {

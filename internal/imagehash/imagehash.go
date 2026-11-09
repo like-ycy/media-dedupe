@@ -20,10 +20,10 @@ import (
 )
 
 // ReadMetadata loads image dimensions and format.
-func ReadMetadata(path string) model.ImageMetadata {
+func ReadMetadata(path string) (model.ImageMetadata, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return model.ImageMetadata{IsReadable: false}
+		return model.ImageMetadata{IsReadable: false}, err
 	}
 	defer f.Close()
 
@@ -32,17 +32,17 @@ func ReadMetadata(path string) model.ImageMetadata {
 		return model.ImageMetadata{
 			FormatName: strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), "."),
 			IsReadable: false,
-		}
+		}, fmt.Errorf("decode image config: %w", err)
 	}
 	if cfg.Width*cfg.Height > config.MaxImagePixels {
-		return model.ImageMetadata{IsReadable: false}
+		return model.ImageMetadata{IsReadable: false}, fmt.Errorf("image exceeds pixel limit")
 	}
 	return model.ImageMetadata{
 		Width:      cfg.Width,
 		Height:     cfg.Height,
 		FormatName: strings.ToUpper(format),
 		IsReadable: true,
-	}
+	}, nil
 }
 
 // LoadImage decodes a full image with pixel budget check.

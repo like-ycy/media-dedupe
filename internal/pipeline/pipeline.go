@@ -118,7 +118,10 @@ func Scan(opts Options) (*Result, error) {
 		opts.TextWorkers = config.DefaultTextWorkers
 	}
 	opts.VideoCompareMode = config.NormalizeVideoMode(opts.VideoCompareMode)
-	ctx := opts.context()
+	parentCtx := opts.context()
+	// A fatal storage/program error cancels in-flight workers and stops the scan.
+	ctx, cancelScan := context.WithCancel(parentCtx)
+	defer cancelScan()
 
 	startWall := time.Now()
 	startStamp := startWall.UTC().Format("2006-01-02 15:04:05")
@@ -165,12 +168,39 @@ func Scan(opts Options) (*Result, error) {
 			CurrentFile: path,
 		})
 	}
+	errCount := func() int {
+		errsMu.Lock()
+		defer errsMu.Unlock()
+		return len(reportErrs)
+	}
+	emit := opts.emit
+	failures := newFailureTracker()
+	hooks := &scanHooks{record: recordErr, failures: failures, cancel: cancelScan}
+	// Files that could not be read are skipped and never stored, so drop any
+	// row this scan may have created for them, even when it is canceled.
+	defer func() { _, _ = c.DeleteFilesByPaths(failures.failedPaths()) }()
+	// abortIfFatal returns the storage/program failure that stopped the scan.
+	abortIfFatal := func(filesSeen int) error {
+		err := failures.fatalErr()
+		if err == nil {
+			return nil
+		}
+		_ = c.FinishScanRun(scanRunID, filesSeen, errCount())
+		emit(progress.Event{
+			Stage:     progress.StageError,
+			Phase:     "error",
+			Message:   err.Error(),
+			FilesSeen: filesSeen,
+			Errors:    errCount(),
+			ProjectID: opts.ProjectID,
+		})
+		return err
+	}
 	progressFn := func(msg string) {
 		if opts.OnProgress != nil {
 			opts.OnProgress(msg)
 		}
 	}
-	emit := opts.emit
 
 	if err := ctx.Err(); err != nil {
 		_ = c.FinishScanRun(scanRunID, 0, 0)
@@ -180,7 +210,15 @@ func Scan(opts Options) (*Result, error) {
 
 	emit(progress.Event{Stage: progress.StageDiscover, Phase: "running", Message: "发现文件...", ProjectID: opts.ProjectID})
 	progressFn("discovering files...")
-	discovered := discovery.Discover(opts.Paths, opts.Recursive, recordErr)
+	discovered := discovery.Discover(opts.Paths, opts.Recursive, func(path, stage string, err error) {
+		// Discovery failures never create a file row; they are only reported.
+		// A storage-level failure still aborts the scan.
+		if isFatalIOError(err) {
+			hooks.fatal(path, stage, err)
+			return
+		}
+		recordErr(path, stage, err.Error())
+	})
 	var files []model.DiscoveredFile
 	for _, d := range discovered {
 		if d.MediaType == model.MediaImage && !opts.IncludeImages {
@@ -194,6 +232,9 @@ func Scan(opts Options) (*Result, error) {
 		}
 		files = append(files, d)
 	}
+	if err := abortIfFatal(len(files)); err != nil {
+		return nil, err
+	}
 	if err := ctx.Err(); err != nil {
 		_ = c.FinishScanRun(scanRunID, len(files), 0)
 		emit(progress.Event{Stage: progress.StageCanceled, Phase: "canceled", Message: "已取消，缓存已保留", FilesSeen: len(files), ProjectID: opts.ProjectID})
@@ -204,7 +245,13 @@ func Scan(opts Options) (*Result, error) {
 
 	infos := make([]fileCacheInfo, len(files))
 	for i, d := range files {
+		if failures.fatalErr() != nil {
+			break
+		}
 		if err := ctx.Err(); err != nil {
+			if ferr := abortIfFatal(len(files)); ferr != nil {
+				return nil, ferr
+			}
 			_ = c.FinishScanRun(scanRunID, len(files), 0)
 			emit(progress.Event{Stage: progress.StageCanceled, Phase: "canceled", Message: "已取消，缓存已保留", FilesSeen: len(files), ProjectID: opts.ProjectID})
 			return &Result{Canceled: true, Meta: model.ScanMeta{Paths: opts.Paths, StartedAt: startStamp, FilesSeen: len(files), CachePath: opts.CachePath}}, nil
@@ -212,19 +259,25 @@ func Scan(opts Options) (*Result, error) {
 		unchanged := c.IsUnchanged(d)
 		id, err := c.UpsertFile(d)
 		if err != nil {
-			recordErr(d.Path, "cache", err.Error())
-			continue
+			hooks.fatal(d.Path, "cache", err)
+			break
 		}
 		infos[i] = fileCacheInfo{fileID: id, unchanged: unchanged}
 		_ = c.TouchFile(id)
+	}
+	if err := abortIfFatal(len(files)); err != nil {
+		return nil, err
 	}
 	_ = c.MarkMissingLastSeenBefore(startStamp)
 
 	emit(progress.Event{Stage: progress.StageExact, Phase: "running", Message: "SHA-256 精确哈希...", Percent: 15, FilesSeen: len(files), ProjectID: opts.ProjectID})
 	progressFn("exact duplicate pass...")
-	exactGroups, usedPaths := exactPass(ctx, c, files, infos, recordErr, opts, &exactCount)
+	exactGroups, usedPaths := exactPass(ctx, c, files, infos, hooks, opts, &exactCount)
+	if err := abortIfFatal(len(files)); err != nil {
+		return nil, err
+	}
 	if err := ctx.Err(); err != nil {
-		_ = c.FinishScanRun(scanRunID, len(files), len(reportErrs))
+		_ = c.FinishScanRun(scanRunID, len(files), errCount())
 		emit(progress.Event{Stage: progress.StageCanceled, Phase: "canceled", Message: "已取消，缓存已保留", FilesSeen: len(files), FoundExact: exactCount, ProjectID: opts.ProjectID})
 		return &Result{Canceled: true, Errors: reportErrs, Meta: model.ScanMeta{Paths: opts.Paths, StartedAt: startStamp, FilesSeen: len(files), CachePath: opts.CachePath}}, nil
 	}
@@ -236,11 +289,14 @@ func Scan(opts Options) (*Result, error) {
 		if err := ctx.Err(); err == nil {
 			emit(progress.Event{Stage: progress.StageImage, Phase: "running", Message: "图片 pHash 感知哈希...", Percent: 40, FilesSeen: len(files), FoundExact: exactCount, ProjectID: opts.ProjectID})
 			progressFn("image similarity pass...")
-			imageFactsList = collectImages(ctx, c, files, infos, usedPaths, recordErr, opts)
+			imageFactsList = collectImages(ctx, c, files, infos, usedPaths, hooks, opts)
 			similarImageGroups = imageSimilarity(imageFactsList, opts)
 			similarCount += len(similarImageGroups)
 			emit(progress.Event{Stage: progress.StageImage, Phase: "done", Message: fmt.Sprintf("近似图片 %d 组", len(similarImageGroups)), Percent: 60, FilesSeen: len(files), FoundExact: exactCount, FoundSimilar: similarCount, ProjectID: opts.ProjectID})
 		}
+	}
+	if err := abortIfFatal(len(files)); err != nil {
+		return nil, err
 	}
 
 	var similarVideoGroups []model.ReportGroup
@@ -256,11 +312,14 @@ func Scan(opts Options) (*Result, error) {
 		} else if err := ctx.Err(); err == nil {
 			emit(progress.Event{Stage: progress.StageVideo, Phase: "running", Message: "视频 FFmpeg 抽帧多帧 pHash...", Percent: 65, FilesSeen: len(files), FoundExact: exactCount, FoundSimilar: similarCount, ProjectID: opts.ProjectID})
 			progressFn("video similarity pass...")
-			videoFactsList := collectVideos(ctx, c, files, infos, usedPaths, recordErr, opts)
+			videoFactsList := collectVideos(ctx, c, files, infos, usedPaths, hooks, opts)
 			similarVideoGroups = videoSimilarity(videoFactsList, opts)
 			similarCount += len(similarVideoGroups)
 			emit(progress.Event{Stage: progress.StageVideo, Phase: "done", Message: fmt.Sprintf("近似视频 %d 组", len(similarVideoGroups)), Percent: 80, FilesSeen: len(files), FoundExact: exactCount, FoundSimilar: similarCount, ProjectID: opts.ProjectID})
 		}
+	}
+	if err := abortIfFatal(len(files)); err != nil {
+		return nil, err
 	}
 	var similarTextGroups []model.ReportGroup
 	if opts.IncludeTexts && ctx.Err() == nil {
@@ -269,7 +328,7 @@ func Scan(opts Options) (*Result, error) {
 		textIDs := make([]int64, 0)
 		textUnchanged := make([]bool, 0)
 		for i, file := range files {
-			if file.MediaType != model.MediaText {
+			if file.MediaType != model.MediaText || hooks.failed(file.Path) {
 				continue
 			}
 			if _, used := usedPaths[file.Path]; used {
@@ -281,7 +340,14 @@ func Scan(opts Options) (*Result, error) {
 		}
 		facts, textErrs := textdedupe.FactsCached(textFiles, textIDs, textUnchanged, opts.TextWorkers, c)
 		for _, textErr := range textErrs {
-			recordErr(textErr.Path, textErr.Stage, textErr.Message)
+			err := errors.New(textErr.Message)
+			// Cache read/write problems are program-level; read failures are
+			// ordinary bad files.
+			if textErr.Stage == "text_cache" {
+				hooks.fatal(textErr.Path, textErr.Stage, err)
+				continue
+			}
+			hooks.file(textErr.Path, textErr.Stage, err)
 		}
 		factsByExtension := make(map[string][]textdedupe.Fact)
 		for _, fact := range facts {
@@ -295,35 +361,29 @@ func Scan(opts Options) (*Result, error) {
 		emit(progress.Event{Stage: progress.StageText, Phase: "done", Message: fmt.Sprintf("文本近似重复 %d 组", len(similarTextGroups)), Percent: 84, FilesSeen: len(files), FoundSimilar: similarCount, ProjectID: opts.ProjectID})
 	}
 
+	if err := abortIfFatal(len(files)); err != nil {
+		return nil, err
+	}
 	if err := ctx.Err(); err != nil {
-		_ = c.FinishScanRun(scanRunID, len(files), len(reportErrs))
+		_ = c.FinishScanRun(scanRunID, len(files), errCount())
 		emit(progress.Event{Stage: progress.StageCanceled, Phase: "canceled", Message: "已取消，缓存已保留", FilesSeen: len(files), FoundExact: exactCount, FoundSimilar: similarCount, ProjectID: opts.ProjectID})
 		return &Result{Canceled: true, Errors: reportErrs, Meta: model.ScanMeta{Paths: opts.Paths, StartedAt: startStamp, FilesSeen: len(files), CachePath: opts.CachePath}}, nil
 	}
 
 	emit(progress.Event{Stage: progress.StageMatch, Phase: "done", Message: "分组匹配完成", Percent: 85, FilesSeen: len(files), FoundExact: exactCount, FoundSimilar: similarCount, ProjectID: opts.ProjectID})
 
-	groups := make([]model.ReportGroup, 0, len(exactGroups)+len(similarImageGroups)+len(similarVideoGroups)+len(similarTextGroups))
+	allGroups := make([]model.ReportGroup, 0, len(exactGroups)+len(similarImageGroups)+len(similarVideoGroups)+len(similarTextGroups))
+	allGroups = append(allGroups, exactGroups...)
+	allGroups = append(allGroups, similarImageGroups...)
+	allGroups = append(allGroups, similarVideoGroups...)
+	allGroups = append(allGroups, similarTextGroups...)
+	// Failed files are never compared; drop them from groups built before the
+	// failure surfaced and discard groups that no longer have two members.
+	allGroups = dropFailedGroups(allGroups, failures)
+
+	groups := make([]model.ReportGroup, 0, len(allGroups))
 	nextID := int64(1)
-	for _, g := range exactGroups {
-		g.GroupID = nextID
-		g.StableKey = groupStableKey(g)
-		nextID++
-		groups = append(groups, g)
-	}
-	for _, g := range similarImageGroups {
-		g.GroupID = nextID
-		g.StableKey = groupStableKey(g)
-		nextID++
-		groups = append(groups, g)
-	}
-	for _, g := range similarVideoGroups {
-		g.GroupID = nextID
-		g.StableKey = groupStableKey(g)
-		nextID++
-		groups = append(groups, g)
-	}
-	for _, g := range similarTextGroups {
+	for _, g := range allGroups {
 		g.GroupID = nextID
 		g.StableKey = groupStableKey(g)
 		nextID++
@@ -373,6 +433,51 @@ func (o Options) emit(ev progress.Event) {
 	o.OnEvent(ev)
 }
 
+// dropFailedGroups removes files that could not be processed from final
+// groups. A group that no longer has two readable members is discarded, and
+// the recommended file is re-picked when it was one of the failed files.
+func dropFailedGroups(groups []model.ReportGroup, failures *failureTracker) []model.ReportGroup {
+	out := groups[:0]
+	for _, g := range groups {
+		items := make([]model.ReportItem, 0, len(g.Items))
+		for _, it := range g.Items {
+			if !failures.failed(it.Path) {
+				items = append(items, it)
+			}
+		}
+		if len(items) < 2 {
+			continue
+		}
+		g.Items = items
+		keepFound := false
+		for _, it := range items {
+			if it.FileID == g.RecommendedFileID {
+				keepFound = true
+				break
+			}
+		}
+		if !keepFound {
+			best := items[0]
+			for _, it := range items[1:] {
+				if it.QualityScore > best.QualityScore {
+					best = it
+				}
+			}
+			g.RecommendedFileID = best.FileID
+		}
+		for i := range items {
+			switch {
+			case items[i].FileID == g.RecommendedFileID:
+				items[i].Action = model.ActionKeep
+			case items[i].Action == model.ActionKeep:
+				items[i].Action = model.ActionCleanup
+			}
+		}
+		out = append(out, g)
+	}
+	return out
+}
+
 func groupStableKey(g model.ReportGroup) string {
 	paths := make([]string, 0, len(g.Items))
 	for _, it := range g.Items {
@@ -404,14 +509,14 @@ func exactPass(
 	c *cache.Cache,
 	files []model.DiscoveredFile,
 	infos []fileCacheInfo,
-	recordErr func(path, stage, message string),
+	hooks *scanHooks,
 	opts Options,
 	exactCount *int,
 ) ([]model.ReportGroup, map[string]struct{}) {
 	used := map[string]struct{}{}
 	sizeBuckets := map[exactBucketKey][]int{}
 	for i, f := range files {
-		if infos[i].fileID == 0 {
+		if infos[i].fileID == 0 || hooks.failed(f.Path) {
 			continue
 		}
 		key := exactBucketKey{size: f.SizeBytes, ext: strings.ToLower(f.Extension)}
@@ -454,11 +559,14 @@ func exactPass(
 			}
 			f := files[idx]
 			fileID := infos[idx].fileID
+			if hooks.failed(f.Path) {
+				return nil
+			}
 			// Small files are cheaper to read fully than to fingerprint twice.
 			if f.SizeBytes < config.QuickTierMinSize {
 				h, err := fullHashFor(c, f, fileID, infos[idx].unchanged)
 				if err != nil {
-					recordErr(f.Path, "file_hash", err.Error())
+					hooks.file(f.Path, "file_hash", err)
 					return nil
 				}
 				fullHashes[idx] = h
@@ -467,7 +575,7 @@ func exactPass(
 			if infos[idx].unchanged {
 				h, ok, err := c.LoadFileHash(fileID)
 				if err != nil {
-					recordErr(f.Path, "file_hash", err.Error())
+					hooks.fatal(f.Path, "file_hash", err)
 					return nil
 				}
 				if ok {
@@ -476,7 +584,7 @@ func exactPass(
 			}
 			h, err := quickHashFor(c, f, fileID, infos[idx].unchanged)
 			if err != nil {
-				recordErr(f.Path, "file_hash", err.Error())
+				hooks.file(f.Path, "file_hash", err)
 				return nil
 			}
 			quickHashes[idx] = h
@@ -501,7 +609,7 @@ func exactPass(
 				if ctx.Err() != nil {
 					return groups, used
 				}
-				if group := buildExactGroup(ctx, c, files, infos, members, 1.0, "identical SHA-256 file hash", used, recordErr); group != nil {
+				if group := buildExactGroup(ctx, c, files, infos, members, 1.0, "identical SHA-256 file hash", used, hooks); group != nil {
 					groups = append(groups, *group)
 					*exactCount++
 				}
@@ -524,7 +632,7 @@ func exactPass(
 			// members as well so they cannot bridge known-different files.
 			verify := needsFullVerification(files[members[0]], opts) || len(known) > 1
 			if !verify && knownCount < len(members) {
-				if group := buildExactGroup(ctx, c, files, infos, members, sampledFingerprintConfidence, "identical sampled content fingerprint (size + head/mid/tail)", used, recordErr); group != nil {
+				if group := buildExactGroup(ctx, c, files, infos, members, sampledFingerprintConfidence, "identical sampled content fingerprint (size + head/mid/tail)", used, hooks); group != nil {
 					groups = append(groups, *group)
 					*exactCount++
 				}
@@ -540,7 +648,7 @@ func exactPass(
 				}
 				h, err := fullHashFor(c, files[idx], infos[idx].fileID, false)
 				if err != nil {
-					recordErr(files[idx].Path, "file_hash", err.Error())
+					hooks.file(files[idx].Path, "file_hash", err)
 					continue
 				}
 				fullHashes[idx] = h
@@ -549,7 +657,7 @@ func exactPass(
 				if ctx.Err() != nil {
 					return groups, used
 				}
-				if group := buildExactGroup(ctx, c, files, infos, confirmed, 1.0, "identical SHA-256 file hash", used, recordErr); group != nil {
+				if group := buildExactGroup(ctx, c, files, infos, confirmed, 1.0, "identical SHA-256 file hash", used, hooks); group != nil {
 					groups = append(groups, *group)
 					*exactCount++
 				}
@@ -593,25 +701,38 @@ func buildExactGroup(
 	confidence float64,
 	reason string,
 	used map[string]struct{},
-	recordErr func(path, stage, message string),
+	hooks *scanHooks,
 ) *model.ReportGroup {
 	if len(members) < 2 {
 		return nil
 	}
 	quality := map[int64]float64{}
+	valid := make([]int, 0, len(members))
 	for _, idx := range members {
 		if ctx.Err() != nil {
 			return nil
 		}
 		f := files[idx]
+		if hooks.failed(f.Path) {
+			continue
+		}
 		fileID := infos[idx].fileID
-		used[f.Path] = struct{}{}
-		quality[fileID] = qualityFor(ctx, c, f, fileID, infos[idx].unchanged, recordErr)
+		q := qualityFor(ctx, c, f, fileID, infos[idx].unchanged)
+		quality[fileID] = q
+		valid = append(valid, idx)
+	}
+	// A group needs at least two readable members; a file that just failed is
+	// never reported as a duplicate.
+	if len(valid) < 2 {
+		return nil
+	}
+	for _, idx := range valid {
+		used[files[idx].Path] = struct{}{}
 	}
 	actions := score.ChooseActions(quality, -1.0)
 	winner := score.Winner(quality)
-	items := make([]model.ReportItem, 0, len(members))
-	for _, idx := range members {
+	items := make([]model.ReportItem, 0, len(valid))
+	for _, idx := range valid {
 		fileID := infos[idx].fileID
 		items = append(items, model.ReportItem{
 			FileID:       fileID,
@@ -641,7 +762,9 @@ func fullHashFor(c *cache.Cache, f model.DiscoveredFile, fileID int64, unchanged
 	if err != nil {
 		return "", err
 	}
-	_ = c.SaveFileHash(fileID, f.SizeBytes, h)
+	if err := c.SaveFileHash(fileID, f.SizeBytes, h); err != nil {
+		return "", err
+	}
 	return h, nil
 }
 
@@ -655,7 +778,9 @@ func quickHashFor(c *cache.Cache, f model.DiscoveredFile, fileID int64, unchange
 	if err != nil {
 		return "", err
 	}
-	_ = c.SaveQuickHash(fileID, f.SizeBytes, h)
+	if err := c.SaveQuickHash(fileID, f.SizeBytes, h); err != nil {
+		return "", err
+	}
 	return h, nil
 }
 
@@ -665,17 +790,44 @@ func qualityFor(
 	f model.DiscoveredFile,
 	fileID int64,
 	unchanged bool,
-	recordErr func(path, stage, message string),
 ) float64 {
 	if f.MediaType == model.MediaText {
 		return score.TextQuality(f.SizeBytes)
 	}
+	// Quality only ranks copies that are already known to be duplicates; a
+	// failed metadata probe must not disqualify byte-identical files. The
+	// comparison stages below still skip files they cannot actually read.
 	if f.MediaType == model.MediaImage {
-		meta := loadImageMeta(c, f, fileID, unchanged, recordErr)
-		return score.ImageQuality(meta, f.SizeBytes)
+		return score.ImageQuality(imageMetaForQuality(c, f, fileID, unchanged), f.SizeBytes)
 	}
-	meta := loadVideoMeta(ctx, c, f, fileID, unchanged, recordErr)
-	return score.VideoQuality(meta)
+	return score.VideoQuality(videoMetaForQuality(ctx, c, f, fileID, unchanged))
+}
+
+func imageMetaForQuality(c *cache.Cache, f model.DiscoveredFile, fileID int64, unchanged bool) model.ImageMetadata {
+	if unchanged {
+		if m, ok, err := c.LoadImageMetadata(fileID); err == nil && ok {
+			return m
+		}
+	}
+	m, err := imgutil.ReadMetadata(f.Path)
+	if err != nil {
+		return m
+	}
+	_ = c.SaveImageMetadata(fileID, m)
+	return m
+}
+
+func videoMetaForQuality(ctx context.Context, c *cache.Cache, f model.DiscoveredFile, fileID int64, unchanged bool) model.VideoMetadata {
+	if unchanged {
+		if m, ok, err := c.LoadVideoMetadata(fileID); err == nil && ok {
+			return m
+		}
+	}
+	m, _ := video.ProbeMetadataContextE(ctx, f.Path)
+	if m.IsReadable {
+		_ = c.SaveVideoMetadata(fileID, m)
+	}
+	return m
 }
 
 func loadImageMeta(
@@ -683,19 +835,27 @@ func loadImageMeta(
 	f model.DiscoveredFile,
 	fileID int64,
 	unchanged bool,
-	recordErr func(path, stage, message string),
-) model.ImageMetadata {
+	hooks *scanHooks,
+) (model.ImageMetadata, bool) {
 	if unchanged {
 		if m, ok, err := c.LoadImageMetadata(fileID); err == nil && ok {
-			return m
+			if !m.IsReadable {
+				hooks.file(f.Path, "image_metadata", errors.New("unreadable image"))
+				return m, false
+			}
+			return m, true
 		}
 	}
-	m := imgutil.ReadMetadata(f.Path)
-	_ = c.SaveImageMetadata(fileID, m)
-	if !m.IsReadable {
-		recordErr(f.Path, "image_metadata", "unreadable image")
+	m, err := imgutil.ReadMetadata(f.Path)
+	if err != nil {
+		hooks.file(f.Path, "image_metadata", err)
+		return m, false
 	}
-	return m
+	if err := c.SaveImageMetadata(fileID, m); err != nil {
+		hooks.fatal(f.Path, "image_metadata", err)
+		return m, false
+	}
+	return m, true
 }
 
 func loadVideoMeta(
@@ -704,28 +864,34 @@ func loadVideoMeta(
 	f model.DiscoveredFile,
 	fileID int64,
 	unchanged bool,
-	recordErr func(path, stage, message string),
-) model.VideoMetadata {
+	hooks *scanHooks,
+) (model.VideoMetadata, bool) {
 	if unchanged {
 		if m, ok, err := c.LoadVideoMetadata(fileID); err == nil && ok {
 			if !m.IsReadable {
-				recordErr(f.Path, "video_metadata", "unreadable video")
+				hooks.file(f.Path, "video_metadata", errors.New("unreadable video"))
+				return m, false
 			}
-			return m
+			return m, true
 		}
 	}
-	m := video.ProbeMetadataContext(ctx, f.Path)
+	m, err := video.ProbeMetadataContextE(ctx, f.Path)
 	if ctx.Err() != nil {
-		return model.VideoMetadata{}
+		return m, false
+	}
+	if err != nil {
+		hooks.file(f.Path, "video_metadata", err)
+		return m, false
 	}
 	if !m.IsReadable {
-		recordErr(f.Path, "video_metadata", "unreadable video")
-		return m
+		hooks.file(f.Path, "video_metadata", errors.New("unreadable video"))
+		return m, false
 	}
 	if err := c.SaveVideoMetadata(fileID, m); err != nil {
-		recordErr(f.Path, "video_metadata", err.Error())
+		hooks.fatal(f.Path, "video_metadata", err)
+		return m, false
 	}
-	return m
+	return m, true
 }
 
 func collectImages(
@@ -734,12 +900,12 @@ func collectImages(
 	files []model.DiscoveredFile,
 	infos []fileCacheInfo,
 	usedPaths map[string]struct{},
-	recordErr func(path, stage, message string),
+	hooks *scanHooks,
 	opts Options,
 ) []imageFacts {
 	var targets []int
 	for i, f := range files {
-		if f.MediaType != model.MediaImage || infos[i].fileID == 0 {
+		if f.MediaType != model.MediaImage || infos[i].fileID == 0 || hooks.failed(f.Path) {
 			continue
 		}
 		if _, used := usedPaths[f.Path]; used {
@@ -764,25 +930,33 @@ func collectImages(
 			fileID := infos[idx].fileID
 			unchanged := infos[idx].unchanged
 
-			meta := loadImageMeta(c, f, fileID, unchanged, recordErr)
-			if !meta.IsReadable {
+			meta, ok := loadImageMeta(c, f, fileID, unchanged, hooks)
+			if !ok {
 				return nil
 			}
 
 			var phash string
 			if unchanged {
-				if hs, err := c.LoadPerceptualHashes(fileID, "image_phash"); err == nil && len(hs) > 0 {
+				hs, err := c.LoadPerceptualHashes(fileID, "image_phash")
+				if err != nil {
+					hooks.fatal(f.Path, "image_cache", err)
+					return nil
+				}
+				if len(hs) > 0 {
 					phash = hs[0]
 				}
 			}
 			if phash == "" {
 				h, err := imgutil.ComputePHashFromFile(f.Path)
 				if err != nil {
-					recordErr(f.Path, "image_phash", err.Error())
+					hooks.file(f.Path, "image_phash", err)
 					return nil
 				}
 				phash = h
-				_ = c.SavePerceptualHashes(fileID, "image_phash", []string{phash})
+				if err := c.SavePerceptualHashes(fileID, "image_phash", []string{phash}); err != nil {
+					hooks.fatal(f.Path, "image_cache", err)
+					return nil
+				}
 			}
 			out[j] = &imageFacts{
 				fileID:    fileID,
@@ -861,12 +1035,12 @@ func collectVideos(
 	files []model.DiscoveredFile,
 	infos []fileCacheInfo,
 	usedPaths map[string]struct{},
-	recordErr func(path, stage, message string),
+	hooks *scanHooks,
 	opts Options,
 ) []videoFacts {
 	tmpRoot, err := os.MkdirTemp("", "media-dedupe-frames-")
 	if err != nil {
-		recordErr(opts.CachePath, "video", err.Error())
+		hooks.aux(opts.CachePath, "video", err)
 		return nil
 	}
 	defer os.RemoveAll(tmpRoot)
@@ -876,7 +1050,7 @@ func collectVideos(
 	if opts.FrameDir != "" {
 		entries, err := os.ReadDir(opts.FrameDir)
 		if err != nil && !os.IsNotExist(err) {
-			recordErr(opts.FrameDir, "video_preview", err.Error())
+			hooks.aux(opts.FrameDir, "video_preview", err)
 		}
 		for _, entry := range entries {
 			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jpg") {
@@ -891,7 +1065,7 @@ func collectVideos(
 
 	var targets []int
 	for i, f := range files {
-		if f.MediaType != model.MediaVideo || infos[i].fileID == 0 {
+		if f.MediaType != model.MediaVideo || infos[i].fileID == 0 || hooks.failed(f.Path) {
 			continue
 		}
 		if _, used := usedPaths[f.Path]; used {
@@ -916,50 +1090,55 @@ func collectVideos(
 			fileID := infos[idx].fileID
 			unchanged := infos[idx].unchanged
 
-			meta := loadVideoMeta(ctx, c, f, fileID, unchanged, recordErr)
-			if !meta.IsReadable || meta.DurationMs <= 0 {
+			meta, ok := loadVideoMeta(ctx, c, f, fileID, unchanged, hooks)
+			if !ok {
+				return nil
+			}
+			if meta.DurationMs <= 0 {
+				hooks.file(f.Path, "video_metadata", errors.New("video has no duration"))
 				return nil
 			}
 
 			var hashes []string
 			hashType := video.FrameHashType(opts.FrameCount)
 			if unchanged {
-				if hs, err := c.LoadPerceptualHashes(fileID, hashType); err != nil {
-					recordErr(f.Path, "video_cache", err.Error())
-				} else {
-					hashes = hs
+				hs, err := c.LoadPerceptualHashes(fileID, hashType)
+				if err != nil {
+					hooks.fatal(f.Path, "video_cache", err)
+					return nil
 				}
+				hashes = hs
 			}
 			if len(hashes) == 0 {
 				fileTmp := filepath.Join(tmpRoot, fmt.Sprintf("f%d", fileID))
 				if err := os.MkdirAll(fileTmp, 0o755); err != nil {
-					recordErr(f.Path, "video_frame_phash", err.Error())
+					hooks.aux(f.Path, "video_frame_phash", err)
 					return nil
 				}
 				defer os.RemoveAll(fileTmp)
 				if err := clearFramePreviews(c, fileID, previewFiles[fmt.Sprint(fileID)]); err != nil {
-					recordErr(f.Path, "video_preview", err.Error())
+					hooks.aux(f.Path, "video_preview", err)
 				}
 				framePaths, err := video.ExtractFramesContext(ctx, f.Path, meta, opts.FrameCount, fileTmp)
 				if err != nil {
 					if ctx.Err() == nil {
-						recordErr(f.Path, "video_frame_phash", err.Error())
+						hooks.file(f.Path, "video_frame_phash", err)
 					}
 					return nil
 				}
 				hs, err := video.HashFrames(ctx, framePaths, config.DefaultFrameFailureLimit)
 				if err != nil {
 					if ctx.Err() == nil {
-						recordErr(f.Path, "video_frame_phash", err.Error())
+						hooks.file(f.Path, "video_frame_phash", err)
 					}
 					return nil
 				}
 				hashes = hs
 				if opts.FrameDir != "" {
 					if err := copyFramePreviews(ctx, c, framePaths, fileID, opts.FrameDir, hashType); err != nil && ctx.Err() == nil {
-						recordErr(f.Path, "video_preview", err.Error())
+						hooks.aux(f.Path, "video_preview", err)
 						if err := c.ReplaceFramePreviews(fileID, nil); err != nil {
-							recordErr(f.Path, "video_preview", err.Error())
+							hooks.aux(f.Path, "video_preview", err)
 						}
 					}
 				}
@@ -967,11 +1146,12 @@ func collectVideos(
 					return nil
 				}
 				if err := c.SavePerceptualHashes(fileID, hashType, hashes); err != nil {
-					recordErr(f.Path, "video_cache", err.Error())
+					hooks.fatal(f.Path, "video_cache", err)
+					return nil
 				}
 			} else if opts.FrameDir != "" {
 				if err := ensureFramePreviews(ctx, c, f.Path, meta, fileID, opts.FrameDir, opts.FrameCount, hashType); err != nil && ctx.Err() == nil {
-					recordErr(f.Path, "video_preview", err.Error())
+					hooks.aux(f.Path, "video_preview", err)
 				}
 			}
 			if ctx.Err() != nil {

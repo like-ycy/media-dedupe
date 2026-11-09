@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -103,6 +104,13 @@ type ScanStatusDTO struct {
 	FilesSeen  int             `json:"filesSeen"`
 	Errors     int             `json:"errors"`
 	DurationMs int64           `json:"durationMs"`
+}
+
+// ScanErrorDTO is one file that the latest scan could not process.
+type ScanErrorDTO struct {
+	Path    string `json:"path"`
+	Stage   string `json:"stage"`
+	Message string `json:"message"`
 }
 
 type GroupListDTO struct {
@@ -632,6 +640,32 @@ func (a *App) GetScanStatus(projectID string) ScanStatusDTO {
 	return ScanStatusDTO{ProjectID: projectID, Running: false}
 }
 
+// ListScanErrors returns the files the latest scan skipped, so the UI can show
+// them after completion instead of failing the whole run.
+func (a *App) ListScanErrors(projectID string) ([]ScanErrorDTO, error) {
+	c, err := a.openProjectCache(projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	runID, ok, err := c.LatestScanRunID()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return []ScanErrorDTO{}, nil
+	}
+	errs, err := c.LoadErrors(&runID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ScanErrorDTO, 0, len(errs))
+	for _, e := range errs {
+		out = append(out, ScanErrorDTO{Path: e.Path, Stage: e.Stage, Message: e.Message})
+	}
+	return out, nil
+}
+
 // refreshLastSummary recomputes the project's stored summary from current
 // group states, keeping the results header and sidebar badge up to date
 // after groups are ignored / processed / their files deleted.
@@ -813,6 +847,13 @@ func (a *App) ListGroups(projectID string, filter GroupFilter) ([]GroupListDTO, 
 			MediaKind:         mediaKind,
 		})
 	}
+	// Default result order is highest confidence first; ties keep group order.
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Confidence != out[j].Confidence {
+			return out[i].Confidence > out[j].Confidence
+		}
+		return out[i].GroupID < out[j].GroupID
+	})
 	if filter.Offset > 0 {
 		if filter.Offset >= len(out) {
 			return []GroupListDTO{}, nil

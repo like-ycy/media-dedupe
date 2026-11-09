@@ -41,6 +41,13 @@ func ProbeMetadata(path string) model.VideoMetadata {
 }
 
 func ProbeMetadataContext(parent context.Context, path string) model.VideoMetadata {
+	meta, _ := ProbeMetadataContextE(parent, path)
+	return meta
+}
+
+// ProbeMetadataContextE is ProbeMetadataContext with the underlying error, so
+// callers can tell a corrupt file from a failing disk.
+func ProbeMetadataContextE(parent context.Context, path string) (model.VideoMetadata, error) {
 	ctx, cancel := context.WithTimeout(parent, config.FFmpegTimeoutSeconds*time.Second)
 	defer cancel()
 
@@ -54,11 +61,11 @@ func ProbeMetadataContext(parent context.Context, path string) model.VideoMetada
 	hideConsole(cmd)
 	out, err := cmd.Output()
 	if err != nil {
-		return model.VideoMetadata{IsReadable: false}
+		return model.VideoMetadata{IsReadable: false}, err
 	}
 	var payload probePayload
 	if err := json.Unmarshal(out, &payload); err != nil {
-		return model.VideoMetadata{IsReadable: false}
+		return model.VideoMetadata{IsReadable: false}, fmt.Errorf("parse ffprobe output: %w", err)
 	}
 
 	var videoStream *struct {
@@ -83,7 +90,7 @@ func ProbeMetadataContext(parent context.Context, path string) model.VideoMetada
 		}
 	}
 	if videoStream == nil {
-		return model.VideoMetadata{IsReadable: false}
+		return model.VideoMetadata{IsReadable: false}, fmt.Errorf("no video stream")
 	}
 
 	durationSec := parseFloat(videoStream.Duration)
@@ -110,7 +117,7 @@ func ProbeMetadataContext(parent context.Context, path string) model.VideoMetada
 		Codec:      videoStream.CodecName,
 		HasAudio:   hasAudio,
 		IsReadable: true,
-	}
+	}, nil
 }
 
 // BuildFrameTimestamps returns evenly spaced ms timestamps between 5%–95%.
