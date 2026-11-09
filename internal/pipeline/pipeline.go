@@ -87,7 +87,7 @@ type videoFacts struct {
 	extension string
 	size      int64
 	meta      model.VideoMetadata
-	hashes    []string
+	frames    []video.FrameHash
 	quality   float64
 }
 
@@ -105,9 +105,7 @@ func Scan(opts Options) (*Result, error) {
 	if opts.VideoWorkers < 1 {
 		opts.VideoWorkers = config.DefaultVideoWorkers
 	}
-	if opts.FrameCount < 1 {
-		opts.FrameCount = config.DefaultFrameCount
-	}
+	opts.FrameCount = config.NormalizeFrameCount(opts.FrameCount)
 	if opts.Threshold <= 0 {
 		opts.Threshold = config.DefaultSimilarityThreshold
 	}
@@ -278,7 +276,12 @@ func Scan(opts Options) (*Result, error) {
 
 	emit(progress.Event{Stage: progress.StageExact, Phase: "running", Message: "SHA-256 精确哈希...", Percent: 15, FilesSeen: len(files), ProjectID: opts.ProjectID})
 	progressFn("exact duplicate pass...")
-	exactGroups, usedPaths := exactPass(ctx, c, files, infos, hooks, opts, &exactCount)
+	exact := exactPass(ctx, c, files, infos, hooks, opts, &exactCount)
+	exactGroups := exact.groups
+	usedPaths := exact.used
+	// From here on the stages only look for near-duplicates; a file that already
+	// has a byte-identical twin must survive a failure in them.
+	hooks.markConfirmed(exactGroups)
 	if err := abortIfFatal(len(files)); err != nil {
 		return nil, err
 	}
@@ -377,14 +380,30 @@ func Scan(opts Options) (*Result, error) {
 
 	emit(progress.Event{Stage: progress.StageMatch, Phase: "done", Message: "分组匹配完成", Percent: 85, FilesSeen: len(files), FoundExact: exactCount, FoundSimilar: similarCount, ProjectID: opts.ProjectID})
 
-	allGroups := make([]model.ReportGroup, 0, len(exactGroups)+len(similarImageGroups)+len(similarVideoGroups)+len(similarTextGroups))
-	allGroups = append(allGroups, exactGroups...)
-	allGroups = append(allGroups, similarImageGroups...)
-	allGroups = append(allGroups, similarVideoGroups...)
-	allGroups = append(allGroups, similarTextGroups...)
+	// Same content, plus a byte-identical copy of one member: the exact group's
+	// representative took part in the similarity stages, so fold its siblings
+	// back in and drop the now-redundant exact group. Otherwise a single extra
+	// copy would make a near-duplicate pair disappear.
+	similarGroups := make([]model.ReportGroup, 0, len(similarImageGroups)+len(similarVideoGroups)+len(similarTextGroups))
+	similarGroups = append(similarGroups, similarImageGroups...)
+	similarGroups = append(similarGroups, similarVideoGroups...)
+	similarGroups = append(similarGroups, similarTextGroups...)
+	fused, absorbedExact := fuseExactGroups(similarGroups, exactGroups, exact.reps, exact.groupOfRep)
+
+	allGroups := make([]model.ReportGroup, 0, len(exactGroups)+len(fused))
+	for i, g := range exactGroups {
+		if _, absorbed := absorbedExact[i]; absorbed {
+			continue
+		}
+		allGroups = append(allGroups, g)
+	}
+	allGroups = append(allGroups, fused...)
 	// Failed files are never compared; drop them from groups built before the
 	// failure surfaced and discard groups that no longer have two members.
 	allGroups = dropFailedGroups(allGroups, failures)
+	// Belt and braces: a path must never be listed in two groups, otherwise the
+	// delete panel counts the same file twice.
+	allGroups = dedupeGroupsByPath(allGroups)
 
 	groups := make([]model.ReportGroup, 0, len(allGroups))
 	nextID := int64(1)
@@ -393,6 +412,16 @@ func Scan(opts Options) (*Result, error) {
 		g.StableKey = groupStableKey(g)
 		nextID++
 		groups = append(groups, g)
+	}
+	// Stage counters count pre-fusion groups; the final numbers should describe
+	// what the report actually contains.
+	exactCount, similarCount = 0, 0
+	for _, g := range groups {
+		if g.GroupType == model.GroupExact {
+			exactCount++
+		} else {
+			similarCount++
+		}
 	}
 
 	// Do not pre-generate JPEG thumbs: the UI previews original images
@@ -478,6 +507,179 @@ func recommendedInGroup(g model.ReportGroup) bool {
 	return false
 }
 
+// fuseExactGroups folds the siblings of every exact group whose representative
+// matched a similarity group into that similarity group. The absorbed exact
+// groups are returned by index so they can be dropped from the report: the
+// same path must never show up in two groups.
+func fuseExactGroups(similar, exact []model.ReportGroup, reps map[int64]int64, groupOfRep map[int64]int) ([]model.ReportGroup, map[int]struct{}) {
+	absorbed := map[int]struct{}{}
+	if len(similar) == 0 || len(groupOfRep) == 0 {
+		return similar, absorbed
+	}
+
+	out := make([]model.ReportGroup, 0, len(similar))
+	for _, g := range similar {
+		base := make(map[int64]float64, len(g.Items))
+		quality := make(map[int64]float64, len(g.Items))
+		present := make(map[int64]struct{}, len(g.Items))
+		items := make([]model.ReportItem, 0, len(g.Items))
+		for _, item := range g.Items {
+			base[item.FileID] = item.Similarity
+			quality[item.FileID] = item.QualityScore
+			present[item.FileID] = struct{}{}
+			items = append(items, item)
+		}
+
+		// Only representatives reach this stage, so every matched exact group
+		// belongs to this group and contributes all of its members.
+		var siblings []model.ReportItem
+		mergedReps := map[int64]struct{}{}
+		for _, item := range g.Items {
+			index, ok := groupOfRep[item.FileID]
+			if !ok {
+				continue
+			}
+			if _, already := absorbed[index]; already {
+				continue
+			}
+			absorbed[index] = struct{}{}
+			mergedReps[item.FileID] = struct{}{}
+			for _, sibling := range exact[index].Items {
+				if _, dup := present[sibling.FileID]; dup {
+					continue
+				}
+				present[sibling.FileID] = struct{}{}
+				quality[sibling.FileID] = sibling.QualityScore
+				siblings = append(siblings, sibling)
+			}
+		}
+		if len(mergedReps) == 0 {
+			out = append(out, g)
+			continue
+		}
+
+		// Byte-identical copies share every hash and every quality score, so
+		// treat them as one candidate keyed by their representative instead of
+		// letting two copies of the same file compete in a ranking.
+		collapsed := make(map[int64]float64, len(quality))
+		for id, value := range quality {
+			key := id
+			if rep := reps[id]; rep != 0 {
+				key = rep
+			}
+			if existing, ok := collapsed[key]; !ok || value > existing {
+				collapsed[key] = value
+			}
+		}
+		// Keep the recommendation and the verdicts the group builder already
+		// produced. Each builder ranks members with rules that fit its media
+		// type — metadata quality for images and videos, file size for text —
+		// and a byte-identical copy can never outrank the member it copies, so
+		// folding copies in must not re-run a different ranking over the group.
+		// Rescoring here is what silently replaced a larger text file, whose
+		// quality score is capped, with a smaller one.
+		winner := g.RecommendedFileID
+		if _, ok := present[winner]; !ok {
+			winner = score.Winner(collapsed)
+		}
+		baseAction := make(map[int64]model.Action, len(g.Items))
+		for _, item := range g.Items {
+			baseAction[item.FileID] = item.Action
+		}
+		winnerRep := reps[winner]
+		for _, sibling := range siblings {
+			similarity := noDirectSimilarity
+			if rep := reps[sibling.FileID]; rep != 0 {
+				if rep == winnerRep {
+					similarity = 1.0
+				} else if value, ok := base[rep]; ok {
+					similarity = value
+				}
+			}
+			reasons := append([]string{}, sibling.Reasons...)
+			reasons = append(reasons, "byte-identical copy merged into this similarity group")
+			items = append(items, model.ReportItem{
+				FileID:       sibling.FileID,
+				Path:         sibling.Path,
+				Similarity:   similarity,
+				QualityScore: sibling.QualityScore,
+				SizeBytes:    sibling.SizeBytes,
+				ThumbPath:    sibling.ThumbPath,
+				Reasons:      reasons,
+			})
+		}
+		for i := range items {
+			action := baseAction[items[i].FileID]
+			if rep := reps[items[i].FileID]; rep != 0 {
+				// A copy inherits its representative's verdict: a certain
+				// duplicate of a duplicate stays certain, and one that still
+				// needs review keeps asking for it.
+				action = baseAction[rep]
+			}
+			// Only one file is kept; its byte-identical copies are certain
+			// cleanup rather than a second "keep".
+			if action == model.ActionKeep && items[i].FileID != winner {
+				action = model.ActionCleanup
+			}
+			items[i].Action = action
+			if _, merged := mergedReps[items[i].FileID]; merged {
+				items[i].Reasons = append(append([]string{}, items[i].Reasons...), "byte-identical copies of this file are in this group")
+			}
+		}
+		g.Items = items
+		g.RecommendedFileID = winner
+		out = append(out, g)
+	}
+	return out, absorbed
+}
+
+// dedupeGroupsByPath guarantees a file appears in at most one group. Groups
+// that lose members are rescored so their recommendation stays actionable.
+//
+// Identity is the path string plus the file ID, never a case-folded path: /media/A.jpg
+// and /media/a.jpg are two different files on Linux and on case-sensitive APFS
+// or Windows directories, so folding case there would drop a real member and
+// dissolve a two-member exact group.
+func dedupeGroupsByPath(groups []model.ReportGroup) []model.ReportGroup {
+	seenPath := make(map[string]struct{}, len(groups))
+	seenID := make(map[int64]struct{}, len(groups))
+	out := groups[:0]
+	for _, g := range groups {
+		items := g.Items[:0]
+		for _, item := range g.Items {
+			path := filepath.Clean(item.Path)
+			if _, dup := seenPath[path]; dup {
+				continue
+			}
+			if _, dup := seenID[item.FileID]; dup {
+				continue
+			}
+			seenPath[path] = struct{}{}
+			seenID[item.FileID] = struct{}{}
+			items = append(items, item)
+		}
+		if len(items) < 2 {
+			continue
+		}
+		dropped := len(items) != len(g.Items)
+		g.Items = items
+		if dropped && !containsFileID(items, g.RecommendedFileID) {
+			rescoreGroup(&g)
+		}
+		out = append(out, g)
+	}
+	return out
+}
+
+func containsFileID(items []model.ReportItem, id int64) bool {
+	for _, item := range items {
+		if item.FileID == id {
+			return true
+		}
+	}
+	return false
+}
+
 // rescoreGroup re-picks the recommended file and its actions with the same
 // rules the group was built with: exact groups never ask for review, while
 // similarity groups keep the review threshold for close quality ties.
@@ -514,14 +716,87 @@ func groupStableKey(g model.ReportGroup) string {
 	return hex.EncodeToString(h.Sum(nil))[:32]
 }
 
+// exactBucketKey groups files by size and media type only. The extension
+// decides which decoder produces a hash, never whether two files may be
+// compared: the same picture saved as .jpg and .png, or the same clip remuxed
+// to .mkv, must still meet in the exact pass.
 type exactBucketKey struct {
-	size int64
-	ext  string
+	size  int64
+	media model.MediaType
 }
 
 // sampledFingerprintConfidence is used for byte-identity claims that were not
 // confirmed by a full read.
 const sampledFingerprintConfidence = 0.99
+
+// exactIndex is the exact-duplicate result plus the bookkeeping the later
+// stages need. One representative per exact group keeps participating in the
+// similarity stages; its siblings are skipped there and merged back when the
+// representative matches something.
+type exactIndex struct {
+	groups []model.ReportGroup
+	// used holds paths of exact-group members that are not the representative.
+	// Comparing them again would report the same file twice.
+	used map[string]struct{}
+	// reps maps every member file ID to its group's representative.
+	reps map[int64]int64
+	// groupOfRep maps a representative file ID to the group's index in groups.
+	groupOfRep map[int64]int
+}
+
+func newExactIndex() *exactIndex {
+	return &exactIndex{
+		used:       map[string]struct{}{},
+		reps:       map[int64]int64{},
+		groupOfRep: map[int64]int{},
+	}
+}
+
+func (x *exactIndex) add(group model.ReportGroup) {
+	index := len(x.groups)
+	x.groups = append(x.groups, group)
+	rep := approximateRepresentative(group)
+	x.groupOfRep[rep.FileID] = index
+	for _, item := range group.Items {
+		x.reps[item.FileID] = rep.FileID
+		if item.FileID != rep.FileID {
+			x.used[item.Path] = struct{}{}
+		}
+	}
+}
+
+// approximateRepresentative picks the member that carries the group into the
+// similarity stages. It is usually the recommended file, but when that file's
+// format has no approximate features — a JPEG renamed to .heic, say — another
+// identical member is used instead, so the group still gets compared with the
+// rest of the library. Holding the whole group back would lose real
+// near-duplicates of the copies we can process.
+func approximateRepresentative(group model.ReportGroup) model.ReportItem {
+	var fallback model.ReportItem
+	hasFallback := false
+	for _, item := range group.Items {
+		if !discovery.SupportsPHash(filepath.Ext(item.Path)) {
+			continue
+		}
+		if item.FileID == group.RecommendedFileID {
+			return item
+		}
+		if !hasFallback || item.FileID < fallback.FileID {
+			fallback, hasFallback = item, true
+		}
+	}
+	if hasFallback {
+		return fallback
+	}
+	// No member can produce approximate features: the recommendation stays the
+	// representative and simply never reaches those stages.
+	for _, item := range group.Items {
+		if item.FileID == group.RecommendedFileID {
+			return item
+		}
+	}
+	return group.Items[0]
+}
 
 func exactPass(
 	ctx context.Context,
@@ -531,19 +806,20 @@ func exactPass(
 	hooks *scanHooks,
 	opts Options,
 	exactCount *int,
-) ([]model.ReportGroup, map[string]struct{}) {
-	used := map[string]struct{}{}
+) *exactIndex {
+	ex := newExactIndex()
 	sizeBuckets := map[exactBucketKey][]int{}
 	for i, f := range files {
 		if infos[i].fileID == 0 || hooks.failed(f.Path) {
 			continue
 		}
-		key := exactBucketKey{size: f.SizeBytes, ext: strings.ToLower(f.Extension)}
+		key := exactBucketKey{size: f.SizeBytes, media: f.MediaType}
 		sizeBuckets[key] = append(sizeBuckets[key], i)
 	}
 
-	// Exact matching is restricted to files sharing size and extension; other
-	// files are never opened in this pass.
+	// Exact matching is restricted to files sharing size and media type; other
+	// files are never opened in this pass. Extensions are deliberately ignored:
+	// a renamed or re-containerized copy is still a byte-identical duplicate.
 	candidate := make([]bool, len(files))
 	candidates := 0
 	for _, idxs := range sizeBuckets {
@@ -556,7 +832,7 @@ func exactPass(
 		}
 	}
 	if candidates == 0 {
-		return nil, used
+		return ex
 	}
 
 	fullHashes := make([]string, len(files))
@@ -612,10 +888,9 @@ func exactPass(
 	}
 	_ = g.Wait()
 	if ctx.Err() != nil {
-		return nil, used
+		return ex
 	}
 
-	var groups []model.ReportGroup
 	for _, idxs := range sizeBuckets {
 		if ctx.Err() != nil {
 			break
@@ -626,10 +901,10 @@ func exactPass(
 		if files[idxs[0]].SizeBytes < config.QuickTierMinSize {
 			for _, members := range groupIndices(func(i int) string { return fullHashes[i] }, idxs) {
 				if ctx.Err() != nil {
-					return groups, used
+					return ex
 				}
-				if group := buildExactGroup(ctx, c, files, infos, members, 1.0, "identical SHA-256 file hash", used, hooks); group != nil {
-					groups = append(groups, *group)
+				if group := buildExactGroup(ctx, c, files, infos, members, 1.0, "identical SHA-256 file hash", hooks); group != nil {
+					ex.add(*group)
 					*exactCount++
 				}
 			}
@@ -637,7 +912,7 @@ func exactPass(
 		}
 		for _, members := range groupIndices(func(i int) string { return quickHashes[i] }, idxs) {
 			if ctx.Err() != nil {
-				return groups, used
+				return ex
 			}
 			if len(members) < 2 {
 				continue
@@ -651,8 +926,8 @@ func exactPass(
 			// members as well so they cannot bridge known-different files.
 			verify := needsFullVerification(files[members[0]], opts) || len(known) > 1
 			if !verify && knownCount < len(members) {
-				if group := buildExactGroup(ctx, c, files, infos, members, sampledFingerprintConfidence, "identical sampled content fingerprint (size + head/mid/tail)", used, hooks); group != nil {
-					groups = append(groups, *group)
+				if group := buildExactGroup(ctx, c, files, infos, members, sampledFingerprintConfidence, "identical sampled content fingerprint (size + head/mid/tail)", hooks); group != nil {
+					ex.add(*group)
 					*exactCount++
 				}
 				continue
@@ -660,7 +935,7 @@ func exactPass(
 			// Reuse full hashes already loaded; read only the missing candidates.
 			for _, idx := range members {
 				if ctx.Err() != nil {
-					return groups, used
+					return ex
 				}
 				if fullHashes[idx] != "" {
 					continue
@@ -674,16 +949,16 @@ func exactPass(
 			}
 			for _, confirmed := range groupIndices(func(i int) string { return fullHashes[i] }, members) {
 				if ctx.Err() != nil {
-					return groups, used
+					return ex
 				}
-				if group := buildExactGroup(ctx, c, files, infos, confirmed, 1.0, "identical SHA-256 file hash", used, hooks); group != nil {
-					groups = append(groups, *group)
+				if group := buildExactGroup(ctx, c, files, infos, confirmed, 1.0, "identical SHA-256 file hash", hooks); group != nil {
+					ex.add(*group)
 					*exactCount++
 				}
 			}
 		}
 	}
-	return groups, used
+	return ex
 }
 
 // needsFullVerification reports whether a sampled fingerprint match must be
@@ -719,7 +994,6 @@ func buildExactGroup(
 	members []int,
 	confidence float64,
 	reason string,
-	used map[string]struct{},
 	hooks *scanHooks,
 ) *model.ReportGroup {
 	if len(members) < 2 {
@@ -744,9 +1018,6 @@ func buildExactGroup(
 	// never reported as a duplicate.
 	if len(valid) < 2 {
 		return nil
-	}
-	for _, idx := range valid {
-		used[files[idx].Path] = struct{}{}
 	}
 	actions := score.ChooseActions(quality, -1.0)
 	winner := score.Winner(quality)
@@ -1000,20 +1271,9 @@ func collectImages(
 	return facts
 }
 
+// imageSimilarity compares every image against every other image regardless of
+// extension: the same picture stored as .jpg and .png must form one group.
 func imageSimilarity(facts []imageFacts, opts Options) []model.ReportGroup {
-	byExtension := make(map[string][]imageFacts)
-	for _, fact := range facts {
-		extension := strings.ToLower(fact.extension)
-		byExtension[extension] = append(byExtension[extension], fact)
-	}
-	var groups []model.ReportGroup
-	for _, bucket := range byExtension {
-		groups = append(groups, imageSimilarityByExtension(bucket, opts)...)
-	}
-	return groups
-}
-
-func imageSimilarityByExtension(facts []imageFacts, opts Options) []model.ReportGroup {
 	if len(facts) < 2 {
 		return nil
 	}
@@ -1118,17 +1378,17 @@ func collectVideos(
 				return nil
 			}
 
-			var hashes []string
+			var frames []video.FrameHash
 			hashType := video.FrameHashType(opts.FrameCount)
 			if unchanged {
-				hs, err := c.LoadPerceptualHashes(fileID, hashType)
+				rows, err := c.LoadFrameHashes(fileID, hashType)
 				if err != nil {
 					hooks.fatal(f.Path, "video_cache", err)
 					return nil
 				}
-				hashes = hs
+				frames = frameHashesFromRows(rows)
 			}
-			if len(hashes) == 0 {
+			if len(frames) == 0 {
 				fileTmp := filepath.Join(tmpRoot, fmt.Sprintf("f%d", fileID))
 				if err := os.MkdirAll(fileTmp, 0o755); err != nil {
 					hooks.aux(f.Path, "video_frame_phash", err)
@@ -1145,16 +1405,26 @@ func collectVideos(
 					}
 					return nil
 				}
-				hs, err := video.HashFrames(ctx, framePaths, config.DefaultFrameFailureLimit)
+				timestamps := video.BuildFrameTimestamps(meta.DurationMs, opts.FrameCount)
+				hs, err := video.HashFrames(ctx, framePaths, timestamps, config.DefaultFrameFailureLimit)
 				if err != nil {
+					if errors.Is(err, video.ErrNoUsableFrames) {
+						// The file decoded fine but every sampled position was
+						// blank: no approximate features, not a read failure.
+						// Marking it failed would delete an exact duplicate that
+						// SHA-256 already confirmed.
+						return nil
+					}
 					if ctx.Err() == nil {
 						hooks.file(f.Path, "video_frame_phash", err)
 					}
 					return nil
 				}
-				hashes = hs
+				frames = hs
 				if opts.FrameDir != "" {
-					if err := copyFramePreviews(ctx, c, framePaths, fileID, opts.FrameDir, hashType); err != nil && ctx.Err() == nil {
+					// Preview names must match the hashed positions: frame N of the
+					// strip and hash N have to be the same moment.
+					if err := copyFramePreviews(ctx, c, framePaths, frames, fileID, opts.FrameDir, hashType); err != nil && ctx.Err() == nil {
 						hooks.aux(f.Path, "video_preview", err)
 						if err := c.ReplaceFramePreviews(fileID, nil); err != nil {
 							hooks.aux(f.Path, "video_preview", err)
@@ -1164,12 +1434,12 @@ func collectVideos(
 				if ctx.Err() != nil {
 					return nil
 				}
-				if err := c.SavePerceptualHashes(fileID, hashType, hashes); err != nil {
+				if err := c.SaveFrameHashes(fileID, hashType, frameHashRows(frames)); err != nil {
 					hooks.fatal(f.Path, "video_cache", err)
 					return nil
 				}
 			} else if opts.FrameDir != "" {
-				if err := ensureFramePreviews(ctx, c, f.Path, meta, fileID, opts.FrameDir, opts.FrameCount, hashType); err != nil && ctx.Err() == nil {
+				if err := ensureFramePreviews(ctx, c, f.Path, meta, fileID, opts.FrameDir, opts.FrameCount, hashType, frames); err != nil && ctx.Err() == nil {
 					hooks.aux(f.Path, "video_preview", err)
 				}
 			}
@@ -1182,7 +1452,7 @@ func collectVideos(
 				extension: strings.ToLower(f.Extension),
 				size:      f.SizeBytes,
 				meta:      meta,
-				hashes:    hashes,
+				frames:    frames,
 				quality:   score.VideoQuality(meta),
 			}
 			out[j] = fact
@@ -1204,7 +1474,7 @@ func framePreviewPath(frameDir string, fileID int64, hashType string, index int)
 	return filepath.Join(frameDir, fmt.Sprintf("%d_%s_%d.jpg", fileID, hashType, index))
 }
 
-func ensureFramePreviews(ctx context.Context, c *cache.Cache, path string, meta model.VideoMetadata, fileID int64, frameDir string, frameCount int, hashType string) error {
+func ensureFramePreviews(ctx context.Context, c *cache.Cache, path string, meta model.VideoMetadata, fileID int64, frameDir string, frameCount int, hashType string, frames []video.FrameHash) error {
 	registered, err := c.LoadFramePreviews(fileID)
 	if err != nil {
 		return err
@@ -1216,11 +1486,22 @@ func ensureFramePreviews(ctx context.Context, c *cache.Cache, path string, meta 
 			valid[path] = struct{}{}
 		}
 	}
+	// Only positions that produced a hash get a preview, so the strip and the
+	// comparison always describe the same moments.
+	hashed := make(map[int]struct{}, len(frames))
+	for _, frame := range frames {
+		hashed[frame.Index] = struct{}{}
+	}
 	timestamps := video.BuildFrameTimestamps(meta.DurationMs, frameCount)
 	paths := make([]string, 0, len(timestamps))
 	for i, ts := range timestamps {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if len(hashed) > 0 {
+			if _, ok := hashed[i]; !ok {
+				continue
+			}
 		}
 		out := framePreviewPath(frameDir, fileID, hashType, i)
 		// A committed preview set includes all available timestamps. An omitted
@@ -1259,19 +1540,41 @@ func clearFramePreviews(c *cache.Cache, fileID int64, paths []string) error {
 	return nil
 }
 
-func copyFramePreviews(ctx context.Context, c *cache.Cache, framePaths []string, fileID int64, frameDir, hashType string) error {
+// frameHashRows and frameHashesFromRows convert between the pipeline's frame
+// hashes and the storage rows, keeping the cache free of video-package imports.
+func frameHashRows(frames []video.FrameHash) []cache.FrameHashRow {
+	rows := make([]cache.FrameHashRow, len(frames))
+	for i, frame := range frames {
+		rows[i] = cache.FrameHashRow{Index: frame.Index, TimestampMs: frame.TimestampMs, Hash: frame.Hash}
+	}
+	return rows
+}
+
+func frameHashesFromRows(rows []cache.FrameHashRow) []video.FrameHash {
+	frames := make([]video.FrameHash, len(rows))
+	for i, row := range rows {
+		frames[i] = video.FrameHash{Index: row.Index, TimestampMs: row.TimestampMs, Hash: row.Hash}
+	}
+	return frames
+}
+
+func copyFramePreviews(ctx context.Context, c *cache.Cache, framePaths []string, frames []video.FrameHash, fileID int64, frameDir, hashType string) error {
 	if err := os.MkdirAll(frameDir, 0o755); err != nil {
 		return err
 	}
-	paths := make([]string, 0, len(framePaths))
-	for index, framePath := range framePaths {
+	paths := make([]string, 0, len(frames))
+	for _, frame := range frames {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if frame.Index < 0 || frame.Index >= len(framePaths) {
+			continue
+		}
+		framePath := framePaths[frame.Index]
 		if framePath == "" {
 			continue
 		}
-		out := framePreviewPath(frameDir, fileID, hashType, index)
+		out := framePreviewPath(frameDir, fileID, hashType, frame.Index)
 		if err := copyFrame(framePath, out); err != nil {
 			return err
 		}
@@ -1302,20 +1605,10 @@ func copyFrame(source, destination string) error {
 	return closeErr
 }
 
+// videoSimilarity compares every video against every other video regardless of
+// extension: the same footage remuxed into another container must still be a
+// candidate.
 func videoSimilarity(facts []videoFacts, opts Options) []model.ReportGroup {
-	byExtension := make(map[string][]videoFacts)
-	for _, fact := range facts {
-		extension := strings.ToLower(fact.extension)
-		byExtension[extension] = append(byExtension[extension], fact)
-	}
-	var groups []model.ReportGroup
-	for _, bucket := range byExtension {
-		groups = append(groups, videoSimilarityByExtension(bucket, opts)...)
-	}
-	return groups
-}
-
-func videoSimilarityByExtension(facts []videoFacts, opts Options) []model.ReportGroup {
 	if len(facts) < 2 {
 		return nil
 	}
@@ -1332,7 +1625,7 @@ func videoSimilarityByExtension(facts []videoFacts, opts Options) []model.Report
 	var edges []model.SimilarityEdge
 	edgeSim := map[[2]int64]float64{}
 	for _, p := range pairs {
-		sim := match.VideoHashSimilarity(facts[p[0]].hashes, facts[p[1]].hashes)
+		sim := match.VideoHashSimilarity(facts[p[0]].frames, facts[p[1]].frames, opts.FrameCount)
 		if sim < opts.Threshold {
 			continue
 		}
@@ -1400,7 +1693,7 @@ func groupsFromComponents(
 				FileID:       id,
 				Path:         info.path,
 				Action:       actions[id],
-				Similarity:   itemSimilarity(id, comp, edgeSim),
+				Similarity:   itemSimilarity(id, winner, edgeSim),
 				QualityScore: info.quality,
 				SizeBytes:    info.size,
 				Reasons:      []string{reason, "quality score uses media metadata"},
@@ -1416,47 +1709,43 @@ func groupsFromComponents(
 	return groups
 }
 
+// noDirectSimilarity marks a member that has no comparison edge to the
+// recommended file. Reporting it as 100% would invite deleting a file that was
+// never actually compared with what is being kept.
+const noDirectSimilarity = -1.0
+
+// componentConfidence reports the weakest pairwise similarity in the group.
+// Pairs without a direct edge count as 0: a chain A≈B≈C (but A≉C) must not
+// advertise the strength of its strongest link.
 func componentConfidence(comp []int64, edgeSim map[[2]int64]float64) float64 {
-	if len(comp) == 0 {
+	if len(comp) < 2 {
 		return 0
 	}
 	minSim := 1.0
-	found := false
 	for i := 0; i < len(comp); i++ {
 		for j := i + 1; j < len(comp); j++ {
+			sim := 0.0
 			if s, ok := edgeSim[match.EdgeKey(comp[i], comp[j])]; ok {
-				found = true
-				if s < minSim {
-					minSim = s
-				}
+				sim = s
+			}
+			if sim < minSim {
+				minSim = sim
 			}
 		}
-	}
-	if !found {
-		return 1.0
 	}
 	return minSim
 }
 
-func itemSimilarity(id int64, comp []int64, edgeSim map[[2]int64]float64) float64 {
-	if len(comp) > 0 && id == comp[0] {
+// itemSimilarity returns how similar id is to the file that would be kept.
+// Members without a direct edge to the recommendation return
+// noDirectSimilarity so callers can show "no direct relation" instead of a
+// fabricated 1.0.
+func itemSimilarity(id, winner int64, edgeSim map[[2]int64]float64) float64 {
+	if id == winner {
 		return 1.0
 	}
-	best := 0.0
-	found := false
-	for _, other := range comp {
-		if other == id {
-			continue
-		}
-		if s, ok := edgeSim[match.EdgeKey(id, other)]; ok {
-			found = true
-			if s > best {
-				best = s
-			}
-		}
+	if sim, ok := edgeSim[match.EdgeKey(id, winner)]; ok {
+		return sim
 	}
-	if !found {
-		return 1.0
-	}
-	return best
+	return noDirectSimilarity
 }

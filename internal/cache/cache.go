@@ -268,12 +268,16 @@ func (c *Cache) PruneReportGroups() error {
 		`DELETE FROM duplicate_groups WHERE id NOT IN (
 			SELECT group_id FROM duplicate_items GROUP BY group_id HAVING COUNT(*) >= 2
 		)`,
-		`UPDATE duplicate_groups SET recommended_file_id = (
-			SELECT file_id FROM duplicate_items i WHERE i.group_id = duplicate_groups.id
-			ORDER BY i.quality_score DESC, i.file_id ASC LIMIT 1
-		) WHERE recommended_file_id NOT IN (
-			SELECT file_id FROM duplicate_items i WHERE i.group_id = duplicate_groups.id
-		)`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return err
+		}
+	}
+	if err := realignRecommendations(tx); err != nil {
+		return err
+	}
+	repairs := []string{
 		`UPDATE duplicate_items SET action = 'cleanup_candidate'
 		WHERE action = 'keep_recommended' AND file_id != (
 			SELECT recommended_file_id FROM duplicate_groups g WHERE g.id = duplicate_items.group_id
@@ -287,12 +291,68 @@ func (c *Cache) PruneReportGroups() error {
 			SELECT 1 FROM duplicate_items r WHERE r.group_id = duplicate_items.group_id AND r.action = 'review_required'
 		)`,
 	}
-	for _, statement := range statements {
+	for _, statement := range repairs {
 		if _, err := tx.Exec(statement); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
+}
+
+// realignRecommendations picks a new recommended file for every group whose
+// recommendation disappeared together with the file, and drops the similarities
+// that were measured against the old one. Without the second step the remaining
+// members keep numbers that point at a file which is no longer being kept, while
+// the UI and the reports explain them relative to the new recommendation.
+func realignRecommendations(tx *sql.Tx) error {
+	rows, err := tx.Query(`
+SELECT g.id, g.group_type FROM duplicate_groups g
+WHERE g.recommended_file_id NOT IN (
+    SELECT file_id FROM duplicate_items i WHERE i.group_id = g.id
+)`)
+	if err != nil {
+		return err
+	}
+	type staleGroup struct {
+		id        int64
+		groupType string
+	}
+	var stale []staleGroup
+	for rows.Next() {
+		var g staleGroup
+		if err := rows.Scan(&g.id, &g.groupType); err != nil {
+			rows.Close()
+			return err
+		}
+		stale = append(stale, g)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, g := range stale {
+		var fileID int64
+		if err := tx.QueryRow(`
+SELECT file_id FROM duplicate_items i WHERE i.group_id = ?
+ORDER BY i.quality_score DESC, i.file_id ASC LIMIT 1`, g.id).Scan(&fileID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE duplicate_groups SET recommended_file_id = ? WHERE id = ?`, fileID, g.id); err != nil {
+			return err
+		}
+		// Exact groups keep their stored level: equal bytes (or an equal
+		// sampled fingerprint) do not depend on which copy is kept.
+		if model.GroupType(g.groupType) == model.GroupExact {
+			continue
+		}
+		if _, err := tx.Exec(`
+UPDATE duplicate_items SET similarity = CASE WHEN file_id = ? THEN 1.0 ELSE ? END
+WHERE group_id = ?`, fileID, similarityToUnknown, g.id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *Cache) UpsertFile(d model.DiscoveredFile) (int64, error) {
@@ -659,6 +719,60 @@ ORDER BY frame_index, id
 	return out, rows.Err()
 }
 
+// FrameHashRow is one stored video frame hash. It mirrors video.FrameHash on
+// purpose: cache must not import the video package, whose FFmpeg plumbing has
+// nothing to do with storage.
+type FrameHashRow struct {
+	Index       int
+	TimestampMs int64
+	Hash        string
+}
+
+// SaveFrameHashes stores per-frame hashes with their timestamps. Frame slots are
+// preserved so a rescan can align samples by time instead of by list position.
+func (c *Cache) SaveFrameHashes(fileID int64, hashType string, frames []FrameHashRow) error {
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`DELETE FROM perceptual_hashes WHERE file_id = ? AND hash_type = ?`, fileID, hashType); err != nil {
+		return err
+	}
+	for _, frame := range frames {
+		if _, err := tx.Exec(`
+INSERT INTO perceptual_hashes (file_id, frame_index, timestamp_ms, hash_type, hash_value, hash_size)
+VALUES (?, ?, ?, ?, ?, ?)
+`, fileID, frame.Index, frame.TimestampMs, hashType, frame.Hash, len(frame.Hash)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// LoadFrameHashes returns the stored frame hashes ordered by timestamp.
+func (c *Cache) LoadFrameHashes(fileID int64, hashType string) ([]FrameHashRow, error) {
+	rows, err := c.db.Query(`
+SELECT COALESCE(frame_index, 0), COALESCE(timestamp_ms, 0), hash_value
+FROM perceptual_hashes
+WHERE file_id = ? AND hash_type = ?
+ORDER BY COALESCE(timestamp_ms, 0), COALESCE(frame_index, 0), id
+`, fileID, hashType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []FrameHashRow
+	for rows.Next() {
+		var frame FrameHashRow
+		if err := rows.Scan(&frame.Index, &frame.TimestampMs, &frame.Hash); err != nil {
+			return nil, err
+		}
+		out = append(out, frame)
+	}
+	return out, rows.Err()
+}
+
 func (c *Cache) ReplaceReportGroups(groups []model.ReportGroup, scanRunID int64) error {
 	// Preserve prior statuses by stable_key so ignore/processed survive rescan.
 	prev := map[string]struct {
@@ -742,12 +856,27 @@ func (c *Cache) SetGroupStatus(groupID int64, status model.GroupStatus) error {
 	}
 }
 
+// UpdateRecommended moves the recommended file of a group and re-aligns the
+// values that are relative to it. A member's similarity is measured against the
+// recommended file, so the numbers stored by the scan describe the previous
+// choice and would point at the wrong file from now on.
+//
+// Exact groups keep their stored similarity: every member is the same bytes (or,
+// for the sampled tier, the same fingerprint), so the value does not depend on
+// which copy is recommended and rewriting it would overstate a sampled match as
+// a confirmed one. For similarity groups the pairwise distances only exist while
+// the scan runs, so the other members are marked as having no direct relation
+// rather than keeping a number that refers to the old recommendation.
 func (c *Cache) UpdateRecommended(groupID, fileID int64) error {
 	tx, err := c.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	var groupType string
+	if err := tx.QueryRow(`SELECT group_type FROM duplicate_groups WHERE id = ?`, groupID).Scan(&groupType); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`UPDATE duplicate_groups SET recommended_file_id = ? WHERE id = ?`, fileID, groupID); err != nil {
 		return err
 	}
@@ -757,8 +886,22 @@ func (c *Cache) UpdateRecommended(groupID, fileID int64) error {
 	if _, err := tx.Exec(`UPDATE duplicate_items SET action = ? WHERE group_id = ? AND file_id != ?`, string(model.ActionCleanup), groupID, fileID); err != nil {
 		return err
 	}
+	if model.GroupType(groupType) == model.GroupExact {
+		return tx.Commit()
+	}
+	if _, err := tx.Exec(`UPDATE duplicate_items SET similarity = ? WHERE group_id = ? AND file_id = ?`, 1.0, groupID, fileID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE duplicate_items SET similarity = ? WHERE group_id = ? AND file_id != ?`, similarityToUnknown, groupID, fileID); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
+
+// similarityToUnknown marks a member whose relation to the recommended file was
+// never measured. Reports render it as "no direct relation" instead of a
+// number, matching the value the scan uses for the same situation.
+const similarityToUnknown = -1.0
 
 // DeleteOpItem is one deleted (or failed) member recorded against a group.
 type DeleteOpItem struct {

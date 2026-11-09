@@ -18,6 +18,7 @@ import (
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"media-dedupe/internal/cache"
+	"media-dedupe/internal/config"
 	"media-dedupe/internal/discovery"
 	"media-dedupe/internal/hashfile"
 	"media-dedupe/internal/mediastore"
@@ -340,6 +341,11 @@ func (a *App) CreateProject(input project.CreateInput) (ProjectDTO, error) {
 	}
 	if input.FrameCount <= 0 {
 		input.FrameCount = st.DefaultFrameCount
+	}
+	// Fewer samples than the comparison needs would leave video similarity
+	// silently switched off, so keep the value inside the usable range.
+	if input.FrameCount < config.MinFrameCount {
+		input.FrameCount = config.MinFrameCount
 	}
 	if input.VideoCompareMode == "" {
 		input.VideoCompareMode = st.DefaultVideoCompareMode

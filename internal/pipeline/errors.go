@@ -84,16 +84,39 @@ type scanHooks struct {
 	record   func(path, stage, kind, message string)
 	failures *failureTracker
 	cancel   func()
+	// confirmed holds the paths whose byte identity the exact pass already
+	// proved. Later stages only add similarity information, so their failures
+	// must not delete a duplicate that SHA-256 has settled.
+	confirmed map[string]struct{}
+}
+
+// markConfirmed records the paths of exact duplicate groups. Call it once the
+// exact pass is done and before any approximate stage starts.
+func (h *scanHooks) markConfirmed(groups []model.ReportGroup) {
+	if h.confirmed == nil {
+		h.confirmed = make(map[string]struct{})
+	}
+	for _, group := range groups {
+		for _, item := range group.Items {
+			h.confirmed[item.Path] = struct{}{}
+		}
+	}
 }
 
 // file skips a file whose own data could not be read. A storage-level error is
-// promoted to a fatal scan failure instead.
+// promoted to a fatal scan failure instead. A file that already has a confirmed
+// duplicate stays in the report: the failure only costs its similarity
+// comparison, so it is kept as a warning.
 func (h *scanHooks) file(path, stage string, err error) {
 	if err == nil {
 		return
 	}
 	if isFatalIOError(err) {
 		h.fatal(path, stage, err)
+		return
+	}
+	if _, ok := h.confirmed[path]; ok {
+		h.record(path, stage, model.ErrorAux, err.Error())
 		return
 	}
 	h.failures.mark(path)

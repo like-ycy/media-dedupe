@@ -12,7 +12,7 @@ export interface ScanError { path: string; stage: string; kind?: string; message
 export interface Group { groupId: number; groupType: string; confidence: number; recommendedFileId: number; status: string; memberCount: number; reclaimableBytes: number; coverThumbUrl: string; typeLabel: string; mediaKind: string }
 export interface Item { fileId: number; path: string; action: string; similarity: number; hammingDistance?: number; qualityScore: number; sizeBytes: number; thumbUrl: string; width: number; height: number; durationMs: number; mediaType: string; mediaHashHex: string; isRecommended: boolean; exists: boolean; reasons: string[] }
 export interface GroupDetail { groupId: number; groupType: string; typeLabel: string; confidence: number; recommendedFileId: number; status: string; reclaimableBytes: number; items: Item[] }
-export interface UpdateInfo { hasUpdate: boolean; currentVersion: string; latestVersion: string; releaseName?: string; releaseNotes?: string; releaseUrl?: string; downloadUrl?: string; assetName?: string; assetSize?: number }
+export interface UpdateInfo { hasUpdate: boolean; currentVersion: string; latestVersion: string; releaseName?: string; releaseNotes?: string; releaseUrl?: string; downloadUrl?: string; assetName?: string; assetSize?: number; checksumsUrl?: string }
 export interface DownloadProgress { downloaded: number; total: number; percent: number; speed: number }
 export interface DeleteResult { succeeded: string[]; failed: { path: string; message: string }[]; mode: string; markedProcessed: number[] }
 

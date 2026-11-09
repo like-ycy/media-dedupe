@@ -191,25 +191,28 @@ func Groups(facts []Fact, threshold float64) []model.ReportGroup {
 			continue
 		}
 		winner := component[0]
-		confidence := 1.0
 		for _, id := range component {
 			if byID[id].Size > byID[winner].Size {
 				winner = id
 			}
 		}
+		// Pairs without a direct edge count as 0 so a chained group never
+		// advertises the strength of its strongest link.
+		confidence := 1.0
 		for i := 0; i < len(component); i++ {
 			for j := i + 1; j < len(component); j++ {
-				if value, ok := similarities[match.EdgeKey(component[i], component[j])]; ok && value < confidence {
+				value := 0.0
+				if similarity, ok := similarities[match.EdgeKey(component[i], component[j])]; ok {
+					value = similarity
+				}
+				if value < confidence {
 					confidence = value
 				}
 			}
 		}
 		items := make([]model.ReportItem, 0, len(component))
 		for _, id := range component {
-			similarity := bestSimilarity(id, component, similarities)
-			if similarity < confidence {
-				confidence = similarity
-			}
+			similarity := similarityToWinner(id, winner, similarities)
 			action := model.ActionReview
 			if id == winner {
 				action = model.ActionKeep
@@ -544,15 +547,18 @@ func hasHan(runes []rune) bool {
 	return false
 }
 
-func bestSimilarity(id int64, component []int64, similarities map[[2]int64]float64) float64 {
-	best := 0.0
-	for _, other := range component {
-		if other == id {
-			continue
-		}
-		if value, ok := similarities[match.EdgeKey(id, other)]; ok && value > best {
-			best = value
-		}
+// NoDirectSimilarity marks a member that has no comparison edge to the
+// recommended file, so the UI can show "no direct relation" instead of a
+// fabricated percentage.
+const NoDirectSimilarity = -1.0
+
+// similarityToWinner returns how similar id is to the file that would be kept.
+func similarityToWinner(id, winner int64, similarities map[[2]int64]float64) float64 {
+	if id == winner {
+		return 1.0
 	}
-	return best
+	if value, ok := similarities[match.EdgeKey(id, winner)]; ok {
+		return value
+	}
+	return NoDirectSimilarity
 }

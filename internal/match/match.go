@@ -5,6 +5,7 @@ import (
 
 	"media-dedupe/internal/hashfile"
 	"media-dedupe/internal/model"
+	"media-dedupe/internal/video"
 )
 
 // UnionFind groups file IDs connected by similarity edges.
@@ -90,29 +91,125 @@ func aspectRatioClose(lw, lh, rw, rh int, tolerance float64) bool {
 	return diff <= tolerance
 }
 
-// VideoHashSimilarity compares frame hash lists with a small temporal offset.
-func VideoHashSimilarity(left, right []string) float64 {
+// VideoHashSimilarity compares sampled frame hashes by timestamp.
+//
+// Extracted frames are sparse: blank or undecodable positions are dropped
+// before they ever reach this function. Aligning by slice index would compare
+// different moments whenever the two videos skipped a different number of
+// frames, so each frame is paired with the nearest sample of the other video
+// within half a sampling interval.
+//
+// Pairing is one-to-one: when sampling intervals differ, a single frame of the
+// short video would otherwise be claimed by every frame of the long one and
+// inflate the coverage past the minimum-pair requirement. Matching runs
+// nearest-in-time first, so the pairing stays the temporally correct one.
+//
+// The result is the median of the paired similarities, and it is 0 when too few
+// frames could be paired: a single surviving frame must never be enough to call
+// two videos duplicates.
+func VideoHashSimilarity(left, right []video.FrameHash, frameCount int) float64 {
 	if len(left) == 0 || len(right) == 0 {
 		return 0
 	}
-	best := 0.0
-	for shift := -1; shift <= 1; shift++ {
-		sims := make([]float64, 0, minInt(len(left), len(right)))
-		for i, leftHash := range left {
-			j := i + shift
-			if j < 0 || j >= len(right) {
+	tolerance := frameTolerance(left, right)
+	if tolerance <= 0 {
+		return 0
+	}
+	sims := make([]float64, 0, minInt(len(left), len(right)))
+	for _, pair := range alignFrames(left, right, tolerance) {
+		sims = append(sims, pair.similarity)
+	}
+	if len(sims) < requiredPairs(frameCount, len(left)) {
+		return 0
+	}
+	return median(sims)
+}
+
+// framePair is one accepted timestamp alignment between two videos.
+type framePair struct {
+	left       int
+	right      int
+	delta      int64
+	similarity float64
+}
+
+// alignFrames resolves the feasible pairs into a one-to-one matching, closest
+// timestamps first, and returns them in that order. Both inputs are small (one
+// entry per sampled frame), so the exhaustive pair list stays cheap.
+func alignFrames(left, right []video.FrameHash, tolerance int64) []framePair {
+	pairs := make([]framePair, 0, len(left)*len(right))
+	for i, l := range left {
+		for j, r := range right {
+			delta := abs64(l.TimestampMs - r.TimestampMs)
+			if delta > tolerance {
 				continue
 			}
-			similarity, err := hashfile.Similarity(leftHash, right[j])
-			if err == nil {
-				sims = append(sims, similarity)
+			similarity, err := hashfile.Similarity(l.Hash, r.Hash)
+			if err != nil {
+				continue
 			}
-		}
-		if similarity := median(sims); similarity > best {
-			best = similarity
+			pairs = append(pairs, framePair{left: i, right: j, delta: delta, similarity: similarity})
 		}
 	}
-	return best
+	sort.SliceStable(pairs, func(a, b int) bool {
+		if pairs[a].delta != pairs[b].delta {
+			return pairs[a].delta < pairs[b].delta
+		}
+		return pairs[a].similarity > pairs[b].similarity
+	})
+	leftUsed := make([]bool, len(left))
+	rightUsed := make([]bool, len(right))
+	matched := pairs[:0]
+	for _, pair := range pairs {
+		if leftUsed[pair.left] || rightUsed[pair.right] {
+			continue
+		}
+		leftUsed[pair.left] = true
+		rightUsed[pair.right] = true
+		matched = append(matched, pair)
+	}
+	return matched
+}
+
+// requiredPairs is the minimum number of aligned frames needed to judge two
+// videos: at least half of the sampled positions, and never fewer than three.
+func requiredPairs(frameCount, available int) int {
+	if frameCount <= 0 {
+		frameCount = available
+	}
+	required := (frameCount + 1) / 2
+	if required < 3 {
+		required = 3
+	}
+	return required
+}
+
+// frameTolerance is half the sampling interval, so neighbouring samples cannot
+// both claim the same frame.
+func frameTolerance(left, right []video.FrameHash) int64 {
+	step := frameStepMs(left)
+	if other := frameStepMs(right); other > step {
+		step = other
+	}
+	return step / 2
+}
+
+// frameStepMs estimates the sampling interval from index/timestamp distances,
+// which stays correct when most samples in between were skipped.
+func frameStepMs(frames []video.FrameHash) int64 {
+	var step int64
+	for i := 1; i < len(frames); i++ {
+		indexDelta := frames[i].Index - frames[i-1].Index
+		timeDelta := frames[i].TimestampMs - frames[i-1].TimestampMs
+		if indexDelta <= 0 || timeDelta <= 0 {
+			continue
+		}
+		candidate := timeDelta / int64(indexDelta)
+		if candidate > 0 && (step == 0 || candidate < step) {
+			step = candidate
+		}
+	}
+	return step
 }
 
 func median(values []float64) float64 {

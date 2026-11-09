@@ -6,10 +6,15 @@ import (
 )
 
 const (
-	DefaultSimilarityThreshold     = 0.95
-	DefaultWorkers                 = 1
-	DefaultVideoWorkers            = 1
-	DefaultFrameCount              = 8
+	DefaultSimilarityThreshold = 0.95
+	DefaultWorkers             = 1
+	DefaultVideoWorkers        = 1
+	DefaultFrameCount          = 8
+	// MinFrameCount is the smallest sampling that can still support a verdict: a
+	// comparison needs at least three aligned frames, so fewer samples could
+	// never match and would silently disable video similarity.
+	MinFrameCount = 3
+
 	DefaultTextWorkers             = 2
 	DefaultTextSimilarityThreshold = 0.92
 	DefaultFrameFailureLimit       = 3
@@ -42,6 +47,20 @@ func NormalizeVideoMode(mode string) string {
 		return VideoModeSimple
 	}
 	return VideoModePrecise
+}
+
+// NormalizeFrameCount keeps the sampled frame count inside the range the
+// comparison can actually use. Anything below MinFrameCount could never reach
+// the minimum number of aligned frames, which would silently turn video
+// similarity off instead of failing loudly.
+func NormalizeFrameCount(count int) int {
+	if count <= 0 {
+		return DefaultFrameCount
+	}
+	if count < MinFrameCount {
+		return MinFrameCount
+	}
+	return count
 }
 
 var ImageExtensions = map[string]struct{}{

@@ -36,6 +36,12 @@ type probePayload struct {
 
 var ErrNoFrame = errors.New("no video frame at timestamp")
 
+// ErrNoUsableFrames reports a video that decoded correctly but produced nothing
+// worth hashing: every sampled position was blank. The file is readable, so
+// callers must not treat this as a processing failure — it only means the video
+// carries no approximate features.
+var ErrNoUsableFrames = errors.New("no usable frames extracted")
+
 // ErrStorageIO marks a subprocess failure whose diagnostic points at the
 // storage layer (failing volume, full disk, read-only mount) rather than at
 // the media file. Callers treat it as a fatal scan error.
@@ -276,15 +282,25 @@ func ExtractFrameContext(parent context.Context, path string, timestampMs int64,
 	return nil
 }
 
-const frameHashTypePrefix = "video_frame_phash_v2_"
+// FrameHash is one sampled frame anchored to its position in the video.
+// Blank and undecodable positions are absent from the list, so two videos must
+// be aligned by timestamp: comparing by slice index would silently pair
+// different moments whenever the skipped frames differ.
+type FrameHash struct {
+	Index       int   // original frame slot (0-based) for preview alignment
+	TimestampMs int64 // sample timestamp within the video
+	Hash        string
+}
+
+const frameHashTypePrefix = "video_frame_phash_v3_"
 
 // FrameHashType returns the cache key for the current extraction algorithm and frame count.
 func FrameHashType(frameCount int) string {
 	return fmt.Sprintf("%s%d", frameHashTypePrefix, frameCount)
 }
 
-// ComputeFrameHashes extracts frames, skips blanks, returns pHashes.
-func ComputeFrameHashes(path string, meta model.VideoMetadata, frameCount int, failureLimit int, tmpDir string) ([]string, error) {
+// ComputeFrameHashes extracts frames, skips blanks, returns timestamped pHashes.
+func ComputeFrameHashes(path string, meta model.VideoMetadata, frameCount int, failureLimit int, tmpDir string) ([]FrameHash, error) {
 	framePaths, err := ExtractFrames(path, meta, frameCount, tmpDir)
 	if err != nil {
 		return nil, err
@@ -294,14 +310,19 @@ func ComputeFrameHashes(path string, meta model.VideoMetadata, frameCount int, f
 			_ = os.Remove(path)
 		}
 	}()
-	return HashFrames(context.Background(), framePaths, failureLimit)
+	return HashFrames(context.Background(), framePaths, BuildFrameTimestamps(meta.DurationMs, frameCount), failureLimit)
 }
 
-// HashFrames hashes the extracted images without removing them, so previews can reuse them.
-func HashFrames(ctx context.Context, framePaths []string, failureLimit int) ([]string, error) {
-	var hashes []string
+// HashFrames hashes the extracted images without removing them, so previews can
+// reuse them. Positions are preserved: a skipped frame leaves a gap in the
+// result instead of shifting the frames after it.
+func HashFrames(ctx context.Context, framePaths []string, timestamps []int64, failureLimit int) ([]FrameHash, error) {
+	if len(timestamps) < len(framePaths) {
+		return nil, fmt.Errorf("frame timestamps (%d) do not cover extracted frames (%d)", len(timestamps), len(framePaths))
+	}
+	var frames []FrameHash
 	failed := 0
-	for _, framePath := range framePaths {
+	for index, framePath := range framePaths {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -327,12 +348,22 @@ func HashFrames(ctx context.Context, framePaths []string, failureLimit int) ([]s
 			}
 			continue
 		}
-		hashes = append(hashes, hash)
+		frames = append(frames, FrameHash{
+			Index:       index,
+			TimestampMs: timestamps[index],
+			Hash:        hash,
+		})
 	}
-	if len(hashes) == 0 {
-		return nil, fmt.Errorf("no usable frames extracted")
+	if len(frames) == 0 {
+		// Extracted frames that could not be decoded are worth reporting; a
+		// video whose sampled positions were blank or simply past its last frame
+		// has no approximate features and is not a failure.
+		if failed > 0 {
+			return nil, fmt.Errorf("no usable frames extracted: %d frames could not be decoded", failed)
+		}
+		return nil, ErrNoUsableFrames
 	}
-	return hashes, nil
+	return frames, nil
 }
 
 // ExtractFrames writes evenly spaced JPEG frames using independent fast seeks.

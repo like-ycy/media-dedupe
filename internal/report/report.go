@@ -28,14 +28,33 @@ type jsonGroup struct {
 }
 
 type jsonItem struct {
-	FileID       int64    `json:"file_id"`
-	Path         string   `json:"path"`
-	Action       string   `json:"action"`
-	Similarity   float64  `json:"similarity"`
+	FileID int64  `json:"file_id"`
+	Path   string `json:"path"`
+	Action string `json:"action"`
+	// Similarity is the similarity to the recommended file. It is null when
+	// the two files were never compared directly (chained group members).
+	Similarity   *float64 `json:"similarity"`
 	QualityScore float64  `json:"quality_score"`
 	SizeBytes    int64    `json:"size_bytes"`
 	Thumb        string   `json:"thumb,omitempty"`
 	Reasons      []string `json:"reasons"`
+}
+
+// similarityValue maps "no direct relation" to nil so exports never expose a
+// raw sentinel such as -1.
+func similarityValue(similarity float64) *float64 {
+	if similarity < 0 {
+		return nil
+	}
+	return &similarity
+}
+
+// similarityText formats a similarity for human-readable reports.
+func similarityText(similarity float64) string {
+	if similarity < 0 {
+		return "—"
+	}
+	return fmt.Sprintf("%.2f", similarity)
 }
 
 func RenderJSON(groups []model.ReportGroup, errs []model.ReportError, meta model.ScanMeta) (string, error) {
@@ -57,7 +76,7 @@ func RenderJSON(groups []model.ReportGroup, errs []model.ReportError, meta model
 				FileID:       it.FileID,
 				Path:         it.Path,
 				Action:       string(it.Action),
-				Similarity:   it.Similarity,
+				Similarity:   similarityValue(it.Similarity),
 				QualityScore: it.QualityScore,
 				SizeBytes:    it.SizeBytes,
 				Thumb:        it.ThumbPath,
@@ -97,8 +116,8 @@ func RenderText(groups []model.ReportGroup, errs []model.ReportError, meta model
 			case model.ActionReview:
 				marker = "?"
 			}
-			fmt.Fprintf(&b, "  %s %s  sim=%.2f quality=%.2f size=%d\n",
-				marker, it.Path, it.Similarity, it.QualityScore, it.SizeBytes)
+			fmt.Fprintf(&b, "  %s %s  sim=%s quality=%.2f size=%d\n",
+				marker, it.Path, similarityText(it.Similarity), it.QualityScore, it.SizeBytes)
 		}
 	}
 	if cleanupBytes > 0 {
@@ -184,13 +203,13 @@ h1 { font-size:22px; margin:0 0 8px; }
 			thumb := previewHTML(it.Path, it.ThumbPath, thumbRel)
 			fmt.Fprintf(&b, `<div class="item">%s<div class="meta">
 <div class="action %s">%s</div>
-<div class="scores">sim=%.2f · quality=%.2f · %s</div>
+<div class="scores">sim=%s · quality=%.2f · %s</div>
 <div class="path">%s</div>
 <div class="muted" style="margin-top:4px">%s</div>
 </div></div>`,
 				thumb,
 				html.EscapeString(string(it.Action)), html.EscapeString(string(it.Action)),
-				it.Similarity, it.QualityScore, humanBytes(it.SizeBytes),
+				similarityText(it.Similarity), it.QualityScore, humanBytes(it.SizeBytes),
 				html.EscapeString(it.Path),
 				html.EscapeString(strings.Join(it.Reasons, "; ")),
 			)

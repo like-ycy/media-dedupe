@@ -23,6 +23,8 @@ const (
 	RepoName  = "media-dedupe"
 	// 国内加速代理前缀
 	DefaultProxyPrefix = "https://ghfast.top/"
+	// checksumsAssetName 是 Release 中列出各资产 SHA-256 的校验和文件。
+	checksumsAssetName = "SHA256SUMS.txt"
 )
 
 // GitHubAPI 是默认请求的 Releases API 地址，测试中可被覆盖。
@@ -57,7 +59,9 @@ type UpdateInfo struct {
 	AssetName      string `json:"assetName"`
 	AssetSize      int64  `json:"assetSize"`
 	Digest         string `json:"digest,omitempty"`
-	Platform       string `json:"platform"`
+	// ChecksumsURL 指向同 Release 的 SHA256SUMS.txt，digest 缺失时用它兜底。
+	ChecksumsURL string `json:"checksumsUrl,omitempty"`
+	Platform     string `json:"platform"`
 }
 
 // DownloadProgress 表示下载进度状态。
@@ -138,6 +142,9 @@ func (m *Manager) CheckUpdate() (*UpdateInfo, error) {
 		info.AssetSize = targetAsset.Size
 		info.Digest = targetAsset.Digest
 	}
+	if sums := findChecksumsAsset(rel.Assets); sums != nil {
+		info.ChecksumsURL = sums.BrowserDownloadURL
+	}
 
 	m.mu.Lock()
 	m.latestInfo = info
@@ -155,6 +162,16 @@ func (m *Manager) LatestInfo() *UpdateInfo {
 	}
 	info := *m.latestInfo
 	return &info
+}
+
+// findChecksumsAsset 返回同 Release 里的 SHA256SUMS.txt 附件。
+func findChecksumsAsset(assets []ReleaseAsset) *ReleaseAsset {
+	for i := range assets {
+		if strings.EqualFold(assets[i].Name, checksumsAssetName) {
+			return &assets[i]
+		}
+	}
+	return nil
 }
 
 // matchAsset 匹配当前系统平台与架构对应的资产。
@@ -182,14 +199,13 @@ func (m *Manager) StartDownload(useProxy bool, onProgress func(DownloadProgress)
 		return fmt.Errorf("未找到有效的新版本下载地址")
 	}
 
-	downloadURL := m.latestInfo.DownloadURL
-	if useProxy {
-		downloadURL = DefaultProxyPrefix + downloadURL
-	}
+	downloadURL := proxyURL(m.latestInfo.DownloadURL, useProxy)
 
 	assetName := m.latestInfo.AssetName
 	expectedSize := m.latestInfo.AssetSize
 	expectedDigest := m.latestInfo.Digest
+	checksumsURL := m.latestInfo.ChecksumsURL
+	releaseURL := m.latestInfo.ReleaseURL
 	if assetName == "" {
 		m.mu.Unlock()
 		return fmt.Errorf("更新包文件名无效")
@@ -332,11 +348,24 @@ func (m *Manager) StartDownload(useProxy bool, onProgress func(DownloadProgress)
 		_ = os.Remove(destPath)
 		return fmt.Errorf("下载文件大小校验失败: 期望 %d 字节，实际 %d 字节", expectedSize, downloaded)
 	}
-	if expectedDigest != "" {
-		if err := verifyDigest(expectedDigest, hasher.Sum(nil)); err != nil {
+	if expectedDigest == "" {
+		// A release asset without a digest must still be verified before the
+		// app replaces itself. Fall back to the release's checksum file, and
+		// refuse to install when neither is available.
+		if checksumsURL == "" {
 			_ = os.Remove(destPath)
-			return err
+			return fmt.Errorf("更新包缺少校验信息，已取消自动安装，请手动下载: %s", releasePage(releaseURL))
 		}
+		digest, err := m.checksumFor(ctx, checksumsURL, assetName, useProxy)
+		if err != nil {
+			_ = os.Remove(destPath)
+			return fmt.Errorf("更新包校验失败，已取消自动安装，请手动下载: %s（%v）", releasePage(releaseURL), err)
+		}
+		expectedDigest = digest
+	}
+	if err := verifyDigest(expectedDigest, hasher.Sum(nil)); err != nil {
+		_ = os.Remove(destPath)
+		return err
 	}
 	m.mu.Lock()
 	m.downloadComplete = true
@@ -358,6 +387,62 @@ func verifyDigest(expected string, actual []byte) error {
 		return fmt.Errorf("更新包 SHA-256 校验失败")
 	}
 	return nil
+}
+
+// checksumFor 从 Release 的 SHA256SUMS.txt 中取出指定资产的摘要，返回
+// "sha256:<hex>"；格式与 digest 字段一致，可直接交给 verifyDigest。
+func (m *Manager) checksumFor(ctx context.Context, checksumsURL, assetName string, useProxy bool) (string, error) {
+	checksumsURL = proxyURL(checksumsURL, useProxy)
+	req, err := http.NewRequestWithContext(ctx, "GET", checksumsURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("创建校验和请求失败: %w", err)
+	}
+	req.Header.Set("User-Agent", "media-dedupe-app")
+	resp, err := m.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("下载校验和文件失败: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("校验和文件返回异常状态码: %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("读取校验和文件失败: %w", err)
+	}
+	target := filepath.Base(assetName)
+	for _, line := range strings.Split(string(body), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		// sha256sum 对二进制模式输出 "*name"，普通模式不带星号。
+		if filepath.Base(strings.TrimPrefix(fields[1], "*")) != target {
+			continue
+		}
+		digest := strings.ToLower(fields[0])
+		if len(digest) != sha256.Size*2 {
+			return "", fmt.Errorf("校验和格式无效: %q", fields[0])
+		}
+		return "sha256:" + digest, nil
+	}
+	return "", fmt.Errorf("校验和文件里没有 %s 的记录", target)
+}
+
+// releasePage 返回可手动下载的发布页地址。
+func releasePage(releaseURL string) string {
+	if releaseURL != "" {
+		return releaseURL
+	}
+	return "https://github.com/" + RepoOwner + "/" + RepoName + "/releases/latest"
+}
+
+// proxyURL 按需给 GitHub 直链加国内加速前缀，下载包与校验和必须走同一路径。
+func proxyURL(url string, useProxy bool) string {
+	if !useProxy || url == "" {
+		return url
+	}
+	return DefaultProxyPrefix + url
 }
 
 // CancelDownload 取消当前的下载。

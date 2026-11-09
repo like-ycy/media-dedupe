@@ -239,3 +239,203 @@ func TestPruneReportGroupsKeepsReviewMarkers(t *testing.T) {
 		}
 	}
 }
+
+// TestUpdateRecommendedRealignsSimilarity covers the case where the user picks a
+// different file to keep. Similarity is measured against the recommended file,
+// so the stored numbers must follow the new choice instead of keeping the ones
+// the scan computed for the previous recommendation.
+func TestUpdateRecommendedRealignsSimilarity(t *testing.T) {
+	c, err := Open(filepath.Join(t.TempDir(), "cache.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ids := seedGroupFiles(t, c, "/tmp/a.jpg", "/tmp/b.jpg", "/tmp/c.jpg")
+	// Chain A≈B≈C: the scan reports B at 0.9 against A and C with no direct edge.
+	if err := c.ReplaceReportGroups([]model.ReportGroup{{
+		GroupType:         model.GroupSimilarImage,
+		Confidence:        0.9,
+		StableKey:         "key",
+		RecommendedFileID: ids[0],
+		Items: []model.ReportItem{
+			{FileID: ids[0], Path: "/tmp/a.jpg", Action: model.ActionKeep, Similarity: 1, QualityScore: 0.9},
+			{FileID: ids[1], Path: "/tmp/b.jpg", Action: model.ActionCleanup, Similarity: 0.9, QualityScore: 0.8},
+			{FileID: ids[2], Path: "/tmp/c.jpg", Action: model.ActionCleanup, Similarity: -1, QualityScore: 0.7},
+		},
+	}}, 1); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := c.LoadReportGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("groups=%d want=1", len(groups))
+	}
+	groupID := groups[0].GroupID
+	if err := c.UpdateRecommended(groupID, ids[2]); err != nil {
+		t.Fatal(err)
+	}
+	groups, err = c.LoadReportGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range groups[0].Items {
+		if it.FileID == ids[2] {
+			if it.Similarity != 1 {
+				t.Fatalf("new recommendation similarity=%v want=1", it.Similarity)
+			}
+			continue
+		}
+		if it.Similarity >= 0 {
+			t.Fatalf("file %d kept stale similarity %v, want unknown", it.FileID, it.Similarity)
+		}
+	}
+}
+
+// TestUpdateRecommendedKeepsExactSimilarity: for byte-identical copies the
+// similarity does not depend on which one is recommended, and a match that was
+// only confirmed by the sampled fingerprint tier keeps its own level instead of
+// being rewritten as a full 1.0.
+func TestUpdateRecommendedKeepsExactSimilarity(t *testing.T) {
+	c, err := Open(filepath.Join(t.TempDir(), "cache.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ids := seedGroupFiles(t, c, "/tmp/a.jpg", "/tmp/b.jpg")
+	if err := c.ReplaceReportGroups([]model.ReportGroup{{
+		GroupType:         model.GroupExact,
+		Confidence:        1,
+		StableKey:         "key",
+		RecommendedFileID: ids[0],
+		Items: []model.ReportItem{
+			{FileID: ids[0], Path: "/tmp/a.jpg", Action: model.ActionKeep, Similarity: sampledSimilarity, QualityScore: 0.9},
+			{FileID: ids[1], Path: "/tmp/b.jpg", Action: model.ActionCleanup, Similarity: sampledSimilarity, QualityScore: 0.9},
+		},
+	}}, 1); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := c.LoadReportGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("groups=%d want=1", len(groups))
+	}
+	groupID := groups[0].GroupID
+	if err := c.UpdateRecommended(groupID, ids[1]); err != nil {
+		t.Fatal(err)
+	}
+	groups, err = c.LoadReportGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range groups[0].Items {
+		if it.Similarity != sampledSimilarity {
+			t.Fatalf("file %d similarity=%v want=%v", it.FileID, it.Similarity, sampledSimilarity)
+		}
+	}
+	if groups[0].RecommendedFileID != ids[1] {
+		t.Fatalf("recommended=%d want=%d", groups[0].RecommendedFileID, ids[1])
+	}
+}
+
+// sampledSimilarity is the level the pipeline uses when byte identity rests on
+// the sampled fingerprint rather than a full read.
+const sampledSimilarity = 0.99
+
+// TestFrameHashRoundTrip keeps frame slot, timestamp and hash together so video
+// frames can be aligned by time after a rescan.
+func TestFrameHashRoundTrip(t *testing.T) {
+	c, err := Open(filepath.Join(t.TempDir(), "cache.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	file := model.DiscoveredFile{Path: "/tmp/clip.mp4", MediaType: model.MediaVideo, Extension: ".mp4", SizeBytes: 100, MTimeNs: 10}
+	id, err := c.UpsertFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Slots 1 and 4 survived; the gap must be preserved, not compacted.
+	frames := []FrameHashRow{
+		{Index: 1, TimestampMs: 500, Hash: "aaaaaaaaaaaaaaaa"},
+		{Index: 4, TimestampMs: 2000, Hash: "bbbbbbbbbbbbbbbb"},
+	}
+	if err := c.SaveFrameHashes(id, "video_frame_phash_v3_8", frames); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := c.LoadFrameHashes(id, "video_frame_phash_v3_8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded) != 2 || loaded[0].Index != 1 || loaded[0].TimestampMs != 500 || loaded[1].Index != 4 {
+		t.Fatalf("unexpected rows: %+v", loaded)
+	}
+	// Rewriting replaces the whole set rather than appending duplicates.
+	if err := c.SaveFrameHashes(id, "video_frame_phash_v3_8", frames[:1]); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = c.LoadFrameHashes(id, "video_frame_phash_v3_8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("expected one row after replacement, got %+v", loaded)
+	}
+}
+
+// TestPruneReportGroupsRealignsSimilarity covers the automatic repick after a
+// deleted file: the surviving members' similarities were measured against the
+// old recommendation, so they must not be presented as if they described the new
+// one.
+func TestPruneReportGroupsRealignsSimilarity(t *testing.T) {
+	c, err := Open(filepath.Join(t.TempDir(), "cache.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ids := seedGroupFiles(t, c, "/tmp/a.jpg", "/tmp/b.jpg", "/tmp/c.jpg")
+	if err := c.ReplaceReportGroups([]model.ReportGroup{{
+		GroupType:         model.GroupSimilarImage,
+		Confidence:        0.9,
+		StableKey:         "key",
+		RecommendedFileID: ids[0],
+		Items: []model.ReportItem{
+			{FileID: ids[0], Path: "/tmp/a.jpg", Action: model.ActionKeep, Similarity: 1, QualityScore: 0.9},
+			{FileID: ids[1], Path: "/tmp/b.jpg", Action: model.ActionCleanup, Similarity: 0.99, QualityScore: 0.8},
+			{FileID: ids[2], Path: "/tmp/c.jpg", Action: model.ActionCleanup, Similarity: 0.7, QualityScore: 0.7},
+		},
+	}}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.DeleteFilesByPaths([]string{"/tmp/a.jpg"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.PruneReportGroups(); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := c.LoadReportGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("groups=%d want=1", len(groups))
+	}
+	group := groups[0]
+	if group.RecommendedFileID != ids[1] {
+		t.Fatalf("recommended=%d want=%d", group.RecommendedFileID, ids[1])
+	}
+	for _, it := range group.Items {
+		if it.FileID == ids[1] {
+			if it.Similarity != 1 {
+				t.Fatalf("new recommendation similarity=%v want=1", it.Similarity)
+			}
+			continue
+		}
+		if it.Similarity >= 0 {
+			t.Fatalf("file %d kept a similarity measured against the deleted file: %v", it.FileID, it.Similarity)
+		}
+	}
+}
