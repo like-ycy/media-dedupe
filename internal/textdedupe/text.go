@@ -55,16 +55,24 @@ type FactCache interface {
 	SaveTextFact(fileID, sizeBytes int64, length int, name string, features []uint64) error
 }
 
-func Facts(files []model.DiscoveredFile, ids []int64, workers int) ([]Fact, []model.ReportError) {
+// FileError is a per-file failure that keeps the underlying error so callers
+// can tell unreadable text from a failing disk or cache.
+type FileError struct {
+	Path  string
+	Stage string
+	Err   error
+}
+
+func Facts(files []model.DiscoveredFile, ids []int64, workers int) ([]Fact, []FileError) {
 	return FactsCached(files, ids, nil, workers, nil)
 }
 
-func FactsCached(files []model.DiscoveredFile, ids []int64, unchanged []bool, workers int, cache FactCache) ([]Fact, []model.ReportError) {
+func FactsCached(files []model.DiscoveredFile, ids []int64, unchanged []bool, workers int, cache FactCache) ([]Fact, []FileError) {
 	if workers < 1 {
 		workers = 1
 	}
 	out := make([]Fact, len(files))
-	errs := make([]model.ReportError, 0)
+	errs := make([]FileError, 0)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	type job struct {
@@ -81,7 +89,7 @@ func FactsCached(files []model.DiscoveredFile, ids []int64, unchanged []bool, wo
 					name, length, cachedFeatures, ok, err := cache.LoadTextFact(ids[job.index], job.file.SizeBytes)
 					if err != nil {
 						mu.Lock()
-						errs = append(errs, model.ReportError{Path: job.file.Path, Stage: "text_cache", Message: err.Error()})
+						errs = append(errs, FileError{Path: job.file.Path, Stage: "text_cache", Err: err})
 						mu.Unlock()
 					} else if ok {
 						out[job.index] = Fact{
@@ -95,7 +103,7 @@ func FactsCached(files []model.DiscoveredFile, ids []int64, unchanged []bool, wo
 				content, err := readText(job.file.Path)
 				if err != nil {
 					mu.Lock()
-					errs = append(errs, model.ReportError{Path: job.file.Path, Stage: "text", Message: err.Error()})
+					errs = append(errs, FileError{Path: job.file.Path, Stage: "text", Err: err})
 					mu.Unlock()
 					continue
 				}
@@ -112,7 +120,7 @@ func FactsCached(files []model.DiscoveredFile, ids []int64, unchanged []bool, wo
 					fact := out[job.index]
 					if err := cache.SaveTextFact(fact.FileID, fact.Size, fact.Length, fact.Name, fact.Features); err != nil {
 						mu.Lock()
-						errs = append(errs, model.ReportError{Path: job.file.Path, Stage: "text_cache", Message: err.Error()})
+						errs = append(errs, FileError{Path: job.file.Path, Stage: "text_cache", Err: err})
 						mu.Unlock()
 					}
 				}

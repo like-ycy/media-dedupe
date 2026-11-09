@@ -110,6 +110,7 @@ type ScanStatusDTO struct {
 type ScanErrorDTO struct {
 	Path    string `json:"path"`
 	Stage   string `json:"stage"`
+	Kind    string `json:"kind"`
 	Message string `json:"message"`
 }
 
@@ -520,7 +521,9 @@ func (a *App) StartScan(projectID string) error {
 		status: ScanStatusDTO{
 			ProjectID: projectID,
 			Running:   true,
-			StartedAt: time.Now().UTC().Format(time.RFC3339),
+			// Sub-second precision identifies one scan run from the next, so the
+			// UI can tell two fast scans apart.
+			StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		},
 	}
 	a.scans[projectID] = st
@@ -578,7 +581,7 @@ func (a *App) runScan(ctx context.Context, p project.Project, st *scanState, ver
 
 	a.mu.Lock()
 	st.status.Running = false
-	st.status.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+	st.status.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	if err != nil {
 		st.status.LastError = err.Error()
 	}
@@ -661,7 +664,7 @@ func (a *App) ListScanErrors(projectID string) ([]ScanErrorDTO, error) {
 	}
 	out := make([]ScanErrorDTO, 0, len(errs))
 	for _, e := range errs {
-		out = append(out, ScanErrorDTO{Path: e.Path, Stage: e.Stage, Message: e.Message})
+		out = append(out, ScanErrorDTO{Path: e.Path, Stage: e.Stage, Kind: e.Kind, Message: e.Message})
 	}
 	return out, nil
 }

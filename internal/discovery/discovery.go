@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"context"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -14,12 +15,17 @@ import (
 
 type ErrorHandler func(path, stage string, err error)
 
-// Discover walks paths and returns media files sorted by directory for HDD locality.
-func Discover(paths []string, recursive bool, onError ErrorHandler) []model.DiscoveredFile {
+// Discover walks paths and returns media files sorted by directory for HDD
+// locality. Walking stops as soon as ctx is canceled, which is how a fatal
+// storage error stops a scan instead of traversing the rest of a dying disk.
+func Discover(ctx context.Context, paths []string, recursive bool, onError ErrorHandler) []model.DiscoveredFile {
 	var found []model.DiscoveredFile
 	seen := map[string]struct{}{}
 
 	for _, raw := range paths {
+		if ctx.Err() != nil {
+			break
+		}
 		root := fsutil.ExpandPath(raw)
 		info, err := os.Stat(root)
 		if err != nil {
@@ -36,7 +42,7 @@ func Discover(paths []string, recursive bool, onError ErrorHandler) []model.Disc
 			continue
 		}
 		if recursive {
-			found = append(found, walkDir(root, seen, onError)...)
+			found = append(found, walkDir(ctx, root, seen, onError)...)
 		} else {
 			entries, err := os.ReadDir(root)
 			if err != nil {
@@ -44,6 +50,9 @@ func Discover(paths []string, recursive bool, onError ErrorHandler) []model.Disc
 				continue
 			}
 			for _, entry := range entries {
+				if ctx.Err() != nil {
+					return found
+				}
 				if entry.IsDir() {
 					continue
 				}
@@ -65,9 +74,14 @@ func Discover(paths []string, recursive bool, onError ErrorHandler) []model.Disc
 	return found
 }
 
-func walkDir(root string, seen map[string]struct{}, onError ErrorHandler) []model.DiscoveredFile {
+func walkDir(ctx context.Context, root string, seen map[string]struct{}, onError ErrorHandler) []model.DiscoveredFile {
 	var found []model.DiscoveredFile
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		// A canceled scan (fatal storage error or user cancel) must stop the
+		// walk instead of enumerating the remaining tree.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if err != nil {
 			record(onError, path, "discovery", err)
 			if d != nil && d.IsDir() {

@@ -6,6 +6,9 @@ import (
 	"io/fs"
 	"sort"
 	"sync"
+
+	"media-dedupe/internal/model"
+	"media-dedupe/internal/video"
 )
 
 // failureTracker records files that must be skipped and the first
@@ -66,9 +69,19 @@ func (t *failureTracker) failedPaths() []string {
 	return out
 }
 
+// cacheWriteError marks a failure to persist a derived artifact (hash,
+// metadata, preview bookkeeping). It says nothing about the source file: the
+// disk, the cache database or the program itself is at fault, so the file must
+// not be skipped or evicted.
+type cacheWriteError struct{ err error }
+
+func (e *cacheWriteError) Error() string { return "cache write: " + e.err.Error() }
+
+func (e *cacheWriteError) Unwrap() error { return e.err }
+
 // scanHooks centralizes per-file and environment failure handling for a scan.
 type scanHooks struct {
-	record   func(path, stage, message string)
+	record   func(path, stage, kind, message string)
 	failures *failureTracker
 	cancel   func()
 }
@@ -84,7 +97,18 @@ func (h *scanHooks) file(path, stage string, err error) {
 		return
 	}
 	h.failures.mark(path)
-	h.record(path, stage, err.Error())
+	h.record(path, stage, model.ErrorSkipped, err.Error())
+}
+
+// read handles an error from a step that both reads the file and stores
+// derived data: source failures skip the file, cache failures abort the scan.
+func (h *scanHooks) read(path, stage string, err error) {
+	var cacheErr *cacheWriteError
+	if errors.As(err, &cacheErr) {
+		h.fatal(path, stage, cacheErr.err)
+		return
+	}
+	h.file(path, stage, err)
 }
 
 // fatal stops the scan: the environment (disk, cache, program state) is broken.
@@ -92,7 +116,7 @@ func (h *scanHooks) fatal(path, stage string, err error) {
 	if err == nil {
 		return
 	}
-	h.record(path, stage, err.Error())
+	h.record(path, stage, model.ErrorFatal, err.Error())
 	h.failures.setFatal(fmt.Errorf("%s: %s: %w", stage, path, err))
 	if h.cancel != nil {
 		h.cancel()
@@ -109,7 +133,7 @@ func (h *scanHooks) aux(path, stage string, err error) {
 		h.fatal(path, stage, err)
 		return
 	}
-	h.record(path, stage, err.Error())
+	h.record(path, stage, model.ErrorAux, err.Error())
 }
 
 func (h *scanHooks) failed(path string) bool {
@@ -128,6 +152,10 @@ func isFatalIOError(err error) bool {
 	}
 	if errors.Is(err, contextCanceled) || errors.Is(err, contextDeadline) {
 		return false
+	}
+	// ffmpeg/ffprobe report disk problems in their diagnostics, not as errno.
+	if errors.Is(err, video.ErrStorageIO) {
+		return true
 	}
 	return fatalStorageError(err)
 }

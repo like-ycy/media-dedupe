@@ -132,3 +132,110 @@ func TestReplaceFramePreviewsRemovesOldIndices(t *testing.T) {
 		}
 	}
 }
+
+func seedGroupFiles(t *testing.T, c *Cache, paths ...string) []int64 {
+	t.Helper()
+	ids := make([]int64, 0, len(paths))
+	for _, path := range paths {
+		id, err := c.UpsertFile(model.DiscoveredFile{Path: path, MediaType: model.MediaImage, Extension: ".jpg"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// Removing a stored file must not leave a group with a dangling recommendation.
+func TestPruneReportGroupsRepairsRecommendation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.sqlite")
+	c, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ids := seedGroupFiles(t, c, "/tmp/a.jpg", "/tmp/b.jpg", "/tmp/c.jpg")
+	err = c.ReplaceReportGroups([]model.ReportGroup{{
+		GroupType:         model.GroupSimilarImage,
+		Confidence:        0.9,
+		StableKey:         "key",
+		RecommendedFileID: ids[0],
+		Items: []model.ReportItem{
+			{FileID: ids[0], Path: "/tmp/a.jpg", Action: model.ActionKeep, QualityScore: 0.9},
+			{FileID: ids[1], Path: "/tmp/b.jpg", Action: model.ActionCleanup, QualityScore: 0.7},
+			{FileID: ids[2], Path: "/tmp/c.jpg", Action: model.ActionCleanup, QualityScore: 0.8},
+		},
+	}}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.DeleteFilesByPaths([]string{"/tmp/a.jpg"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.PruneReportGroups(); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := c.LoadReportGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("groups=%d want=1", len(groups))
+	}
+	if groups[0].RecommendedFileID != ids[2] {
+		t.Fatalf("recommended=%d want=%d", groups[0].RecommendedFileID, ids[2])
+	}
+	for _, it := range groups[0].Items {
+		want := model.ActionCleanup
+		if it.FileID == ids[2] {
+			want = model.ActionKeep
+		}
+		if it.Action != want {
+			t.Fatalf("file %d action=%s want=%s", it.FileID, it.Action, want)
+		}
+	}
+}
+
+// Review markers must survive the repair: re-picking a recommendation is not a
+// reason to tell the user which copy to keep.
+func TestPruneReportGroupsKeepsReviewMarkers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.sqlite")
+	c, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ids := seedGroupFiles(t, c, "/tmp/a.jpg", "/tmp/b.jpg", "/tmp/c.jpg")
+	err = c.ReplaceReportGroups([]model.ReportGroup{{
+		GroupType:         model.GroupSimilarImage,
+		Confidence:        0.9,
+		StableKey:         "key",
+		RecommendedFileID: ids[0],
+		Items: []model.ReportItem{
+			{FileID: ids[0], Path: "/tmp/a.jpg", Action: model.ActionReview, QualityScore: 0.9},
+			{FileID: ids[1], Path: "/tmp/b.jpg", Action: model.ActionReview, QualityScore: 0.89},
+			{FileID: ids[2], Path: "/tmp/c.jpg", Action: model.ActionReview, QualityScore: 0.88},
+		},
+	}}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.DeleteFilesByPaths([]string{"/tmp/a.jpg"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.PruneReportGroups(); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := c.LoadReportGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("groups=%d want=1", len(groups))
+	}
+	for _, it := range groups[0].Items {
+		if it.Action != model.ActionReview {
+			t.Fatalf("file %d action=%s want review", it.FileID, it.Action)
+		}
+	}
+}

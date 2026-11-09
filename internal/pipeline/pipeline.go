@@ -154,12 +154,12 @@ func Scan(opts Options) (*Result, error) {
 	var reportErrs []model.ReportError
 	exactCount := 0
 	similarCount := 0
-	recordErr := func(path, stage, message string) {
+	recordErr := func(path, stage, kind, message string) {
 		errsMu.Lock()
-		reportErrs = append(reportErrs, model.ReportError{Path: path, Stage: stage, Message: message})
+		reportErrs = append(reportErrs, model.ReportError{Path: path, Stage: stage, Kind: kind, Message: message})
 		n := len(reportErrs)
 		errsMu.Unlock()
-		_ = c.RecordError(scanRunID, path, stage, message)
+		_ = c.RecordError(scanRunID, path, stage, kind, message)
 		opts.emit(progress.Event{
 			Stage:       progress.StageError,
 			Phase:       "error",
@@ -178,7 +178,13 @@ func Scan(opts Options) (*Result, error) {
 	hooks := &scanHooks{record: recordErr, failures: failures, cancel: cancelScan}
 	// Files that could not be read are skipped and never stored, so drop any
 	// row this scan may have created for them, even when it is canceled.
-	defer func() { _, _ = c.DeleteFilesByPaths(failures.failedPaths()) }()
+	// Stored groups from the previous scan lose those members too; repair them
+	// in the same step so no group is left without a valid recommendation.
+	defer func() {
+		if deleted, err := c.DeleteFilesByPaths(failures.failedPaths()); err == nil && deleted > 0 {
+			_ = c.PruneReportGroups()
+		}
+	}()
 	// abortIfFatal returns the storage/program failure that stopped the scan.
 	abortIfFatal := func(filesSeen int) error {
 		err := failures.fatalErr()
@@ -210,14 +216,14 @@ func Scan(opts Options) (*Result, error) {
 
 	emit(progress.Event{Stage: progress.StageDiscover, Phase: "running", Message: "发现文件...", ProjectID: opts.ProjectID})
 	progressFn("discovering files...")
-	discovered := discovery.Discover(opts.Paths, opts.Recursive, func(path, stage string, err error) {
+	discovered := discovery.Discover(ctx, opts.Paths, opts.Recursive, func(path, stage string, err error) {
 		// Discovery failures never create a file row; they are only reported.
 		// A storage-level failure still aborts the scan.
 		if isFatalIOError(err) {
 			hooks.fatal(path, stage, err)
 			return
 		}
-		recordErr(path, stage, err.Error())
+		recordErr(path, stage, model.ErrorSkipped, err.Error())
 	})
 	var files []model.DiscoveredFile
 	for _, d := range discovered {
@@ -340,14 +346,13 @@ func Scan(opts Options) (*Result, error) {
 		}
 		facts, textErrs := textdedupe.FactsCached(textFiles, textIDs, textUnchanged, opts.TextWorkers, c)
 		for _, textErr := range textErrs {
-			err := errors.New(textErr.Message)
 			// Cache read/write problems are program-level; read failures are
-			// ordinary bad files.
+			// ordinary bad files and keep their errno for classification.
 			if textErr.Stage == "text_cache" {
-				hooks.fatal(textErr.Path, textErr.Stage, err)
+				hooks.fatal(textErr.Path, textErr.Stage, textErr.Err)
 				continue
 			}
-			hooks.file(textErr.Path, textErr.Stage, err)
+			hooks.file(textErr.Path, textErr.Stage, textErr.Err)
 		}
 		factsByExtension := make(map[string][]textdedupe.Fact)
 		for _, fact := range facts {
@@ -436,6 +441,10 @@ func (o Options) emit(ev progress.Event) {
 // dropFailedGroups removes files that could not be processed from final
 // groups. A group that no longer has two readable members is discarded, and
 // the recommended file is re-picked when it was one of the failed files.
+//
+// Groups that lost no member keep their actions exactly as scored: close
+// quality ties are intentionally reported as "review required", and promoting
+// the recommended member to "keep" here would silently drop that signal.
 func dropFailedGroups(groups []model.ReportGroup, failures *failureTracker) []model.ReportGroup {
 	out := groups[:0]
 	for _, g := range groups {
@@ -448,34 +457,44 @@ func dropFailedGroups(groups []model.ReportGroup, failures *failureTracker) []mo
 		if len(items) < 2 {
 			continue
 		}
+		dropped := len(items) != len(g.Items)
 		g.Items = items
-		keepFound := false
-		for _, it := range items {
-			if it.FileID == g.RecommendedFileID {
-				keepFound = true
-				break
-			}
-		}
-		if !keepFound {
-			best := items[0]
-			for _, it := range items[1:] {
-				if it.QualityScore > best.QualityScore {
-					best = it
-				}
-			}
-			g.RecommendedFileID = best.FileID
-		}
-		for i := range items {
-			switch {
-			case items[i].FileID == g.RecommendedFileID:
-				items[i].Action = model.ActionKeep
-			case items[i].Action == model.ActionKeep:
-				items[i].Action = model.ActionCleanup
-			}
+		// Only a group whose recommendation disappeared needs new actions;
+		// everything else stays byte-identical to the normal scoring output.
+		if dropped && !recommendedInGroup(g) {
+			rescoreGroup(&g)
 		}
 		out = append(out, g)
 	}
 	return out
+}
+
+func recommendedInGroup(g model.ReportGroup) bool {
+	for _, it := range g.Items {
+		if it.FileID == g.RecommendedFileID {
+			return true
+		}
+	}
+	return false
+}
+
+// rescoreGroup re-picks the recommended file and its actions with the same
+// rules the group was built with: exact groups never ask for review, while
+// similarity groups keep the review threshold for close quality ties.
+func rescoreGroup(g *model.ReportGroup) {
+	quality := make(map[int64]float64, len(g.Items))
+	for _, it := range g.Items {
+		quality[it.FileID] = it.QualityScore
+	}
+	reviewDelta := 0.0
+	if g.GroupType == model.GroupExact {
+		reviewDelta = -1.0
+	}
+	actions := score.ChooseActions(quality, reviewDelta)
+	g.RecommendedFileID = score.Winner(quality)
+	for i := range g.Items {
+		g.Items[i].Action = actions[g.Items[i].FileID]
+	}
 }
 
 func groupStableKey(g model.ReportGroup) string {
@@ -566,7 +585,7 @@ func exactPass(
 			if f.SizeBytes < config.QuickTierMinSize {
 				h, err := fullHashFor(c, f, fileID, infos[idx].unchanged)
 				if err != nil {
-					hooks.file(f.Path, "file_hash", err)
+					hooks.read(f.Path, "file_hash", err)
 					return nil
 				}
 				fullHashes[idx] = h
@@ -584,7 +603,7 @@ func exactPass(
 			}
 			h, err := quickHashFor(c, f, fileID, infos[idx].unchanged)
 			if err != nil {
-				hooks.file(f.Path, "file_hash", err)
+				hooks.read(f.Path, "file_hash", err)
 				return nil
 			}
 			quickHashes[idx] = h
@@ -648,7 +667,7 @@ func exactPass(
 				}
 				h, err := fullHashFor(c, files[idx], infos[idx].fileID, false)
 				if err != nil {
-					hooks.file(files[idx].Path, "file_hash", err)
+					hooks.read(files[idx].Path, "file_hash", err)
 					continue
 				}
 				fullHashes[idx] = h
@@ -763,7 +782,7 @@ func fullHashFor(c *cache.Cache, f model.DiscoveredFile, fileID int64, unchanged
 		return "", err
 	}
 	if err := c.SaveFileHash(fileID, f.SizeBytes, h); err != nil {
-		return "", err
+		return "", &cacheWriteError{err: err}
 	}
 	return h, nil
 }
@@ -779,7 +798,7 @@ func quickHashFor(c *cache.Cache, f model.DiscoveredFile, fileID int64, unchange
 		return "", err
 	}
 	if err := c.SaveQuickHash(fileID, f.SizeBytes, h); err != nil {
-		return "", err
+		return "", &cacheWriteError{err: err}
 	}
 	return h, nil
 }

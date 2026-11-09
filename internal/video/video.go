@@ -1,6 +1,7 @@
 package video
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -35,6 +36,78 @@ type probePayload struct {
 
 var ErrNoFrame = errors.New("no video frame at timestamp")
 
+// ErrStorageIO marks a subprocess failure whose diagnostic points at the
+// storage layer (failing volume, full disk, read-only mount) rather than at
+// the media file. Callers treat it as a fatal scan error.
+var ErrStorageIO = errors.New("storage i/o error")
+
+// storageDiagnostics lists what ffmpeg/ffprobe print when the volume itself is
+// failing. A process only reports a generic exit status, so the message text
+// is the only signal available.
+var storageDiagnostics = []string{
+	"input/output error",
+	"i/o error",
+	"no space left on device",
+	"disk full",
+	"read-only file system",
+	"too many open files",
+	"quota exceeded",
+	"device not configured",
+	"device is not connected",
+	"device not ready",
+	"media is write protected",
+}
+
+// toolFailure keeps the diagnostic of a failed subprocess and marks
+// storage-level problems so a dying disk is never reported as bad media.
+func toolFailure(tool, stderr string, cause error) error {
+	detail := diagnosticLine(stderr)
+	if detail == "" {
+		return fmt.Errorf("%s: %w", tool, cause)
+	}
+	if storage := storageDiagnosticLine(stderr); storage != "" {
+		return fmt.Errorf("%s: %w: %s", tool, ErrStorageIO, storage)
+	}
+	return fmt.Errorf("%s: %w: %s", tool, cause, detail)
+}
+
+// diagnosticLine returns the first meaningful line of tool stderr.
+func diagnosticLine(stderr string) string {
+	for _, line := range strings.Split(stderr, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			return truncateDiagnostic(trimmed)
+		}
+	}
+	return ""
+}
+
+// storageDiagnosticLine returns the first stderr line that points at the
+// storage layer, if any.
+func storageDiagnosticLine(stderr string) string {
+	for _, line := range strings.Split(stderr, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		lower := strings.ToLower(trimmed)
+		for _, needle := range storageDiagnostics {
+			if strings.Contains(lower, needle) {
+				return truncateDiagnostic(trimmed)
+			}
+		}
+	}
+	return ""
+}
+
+func truncateDiagnostic(line string) string {
+	const limit = 300
+	runes := []rune(line)
+	if len(runes) <= limit {
+		return line
+	}
+	return string(runes[:limit]) + "…"
+}
+
 // ProbeMetadata runs ffprobe and parses video metadata.
 func ProbeMetadata(path string) model.VideoMetadata {
 	return ProbeMetadataContext(context.Background(), path)
@@ -59,9 +132,14 @@ func ProbeMetadataContextE(parent context.Context, path string) (model.VideoMeta
 		path,
 	)
 	hideConsole(cmd)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return model.VideoMetadata{IsReadable: false}, err
+		if ctx.Err() != nil {
+			return model.VideoMetadata{IsReadable: false}, ctx.Err()
+		}
+		return model.VideoMetadata{IsReadable: false}, toolFailure("ffprobe", stderr.String(), err)
 	}
 	var payload probePayload
 	if err := json.Unmarshal(out, &payload); err != nil {
@@ -178,12 +256,14 @@ func ExtractFrameContext(parent context.Context, path string, timestampMs int64,
 		outPath,
 	)
 	hideConsole(cmd)
-	if output, err := cmd.CombinedOutput(); err != nil {
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
 		_ = os.Remove(outPath)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return fmt.Errorf("extract frame: %w: %s", err, strings.TrimSpace(string(output)))
+		return toolFailure("ffmpeg", stderr.String(), err)
 	}
 	if info, err := os.Stat(outPath); err != nil {
 		if os.IsNotExist(err) {

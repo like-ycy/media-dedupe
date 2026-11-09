@@ -103,8 +103,17 @@ type ReportGroup struct {
 type ReportError struct {
 	Path    string
 	Stage   string
+	Kind    string
 	Message string
 }
+
+// Scan error kinds. Skipped files never enter the cache or the comparison;
+// auxiliary warnings only affected generated previews.
+const (
+	ErrorSkipped = "skipped"
+	ErrorAux     = "aux"
+	ErrorFatal   = "fatal"
+)
 
 type ScanMeta struct {
 	Paths       []string `json:"paths"`

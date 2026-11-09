@@ -140,6 +140,7 @@ CREATE TABLE IF NOT EXISTS errors (
     scan_run_id INTEGER,
     path TEXT NOT NULL,
     stage TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'skipped',
     message TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -157,6 +158,7 @@ CREATE INDEX IF NOT EXISTS idx_files_size ON files(size_bytes);
 	_, _ = c.db.Exec(`ALTER TABLE duplicate_groups ADD COLUMN stable_key TEXT`)
 	_, _ = c.db.Exec(`ALTER TABLE duplicate_groups ADD COLUMN ignored_at TEXT`)
 	_, _ = c.db.Exec(`ALTER TABLE duplicate_groups ADD COLUMN processed_at TEXT`)
+	_, _ = c.db.Exec(`ALTER TABLE errors ADD COLUMN kind TEXT NOT NULL DEFAULT 'skipped'`)
 	// Older caches stored text features as JSON arrays (very large). Prefer
 	// packed uint64 blobs; keep the JSON column readable for legacy rows.
 	_, _ = c.db.Exec(`ALTER TABLE text_facts ADD COLUMN features_blob BLOB`)
@@ -207,10 +209,13 @@ func (c *Cache) FinishScanRun(id int64, filesSeen, filesFailed int) error {
 	return err
 }
 
-func (c *Cache) RecordError(scanRunID int64, path, stage, message string) error {
+func (c *Cache) RecordError(scanRunID int64, path, stage, kind, message string) error {
+	if kind == "" {
+		kind = model.ErrorSkipped
+	}
 	_, err := c.db.Exec(
-		`INSERT INTO errors (scan_run_id, path, stage, message) VALUES (?, ?, ?, ?)`,
-		scanRunID, path, stage, message,
+		`INSERT INTO errors (scan_run_id, path, stage, kind, message) VALUES (?, ?, ?, ?, ?)`,
+		scanRunID, path, stage, kind, message,
 	)
 	return err
 }
@@ -244,6 +249,50 @@ func (c *Cache) DeleteFilesByPaths(paths []string) (int, error) {
 		return deleted, err
 	}
 	return deleted, nil
+}
+
+// PruneReportGroups repairs stored results after file rows were removed
+// outside a rescan (a canceled or aborted scan that skipped unreadable files).
+// Groups that lost members are dropped, a dangling recommendation is re-picked
+// by quality, and a keep flag that no longer matches the recommendation is
+// demoted. Groups reported as "review required" stay that way.
+func (c *Cache) PruneReportGroups() error {
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	statements := []string{
+		// Duplicate items of removed files are already cascaded away, so a
+		// group with fewer than two rows can no longer be acted on.
+		`DELETE FROM duplicate_groups WHERE id NOT IN (
+			SELECT group_id FROM duplicate_items GROUP BY group_id HAVING COUNT(*) >= 2
+		)`,
+		`UPDATE duplicate_groups SET recommended_file_id = (
+			SELECT file_id FROM duplicate_items i WHERE i.group_id = duplicate_groups.id
+			ORDER BY i.quality_score DESC, i.file_id ASC LIMIT 1
+		) WHERE recommended_file_id NOT IN (
+			SELECT file_id FROM duplicate_items i WHERE i.group_id = duplicate_groups.id
+		)`,
+		`UPDATE duplicate_items SET action = 'cleanup_candidate'
+		WHERE action = 'keep_recommended' AND file_id != (
+			SELECT recommended_file_id FROM duplicate_groups g WHERE g.id = duplicate_items.group_id
+		)`,
+		// Only decisive groups get a new keep; an all-review group keeps its
+		// review markers so the user still sees the tie.
+		`UPDATE duplicate_items SET action = 'keep_recommended'
+		WHERE action = 'cleanup_candidate' AND file_id = (
+			SELECT recommended_file_id FROM duplicate_groups g WHERE g.id = duplicate_items.group_id
+		) AND NOT EXISTS (
+			SELECT 1 FROM duplicate_items r WHERE r.group_id = duplicate_items.group_id AND r.action = 'review_required'
+		)`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (c *Cache) UpsertFile(d model.DiscoveredFile) (int64, error) {
@@ -919,7 +968,7 @@ ORDER BY duplicate_items.file_id
 }
 
 func (c *Cache) LoadErrors(scanRunID *int64) ([]model.ReportError, error) {
-	query := `SELECT path, stage, message FROM errors`
+	query := `SELECT path, stage, COALESCE(kind, 'skipped'), message FROM errors`
 	args := []any{}
 	if scanRunID != nil {
 		query += ` WHERE scan_run_id = ?`
@@ -934,7 +983,7 @@ func (c *Cache) LoadErrors(scanRunID *int64) ([]model.ReportError, error) {
 	var out []model.ReportError
 	for rows.Next() {
 		var e model.ReportError
-		if err := rows.Scan(&e.Path, &e.Stage, &e.Message); err != nil {
+		if err := rows.Scan(&e.Path, &e.Stage, &e.Kind, &e.Message); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
