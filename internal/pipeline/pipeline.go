@@ -520,12 +520,10 @@ func fuseExactGroups(similar, exact []model.ReportGroup, reps map[int64]int64, g
 	out := make([]model.ReportGroup, 0, len(similar))
 	for _, g := range similar {
 		base := make(map[int64]float64, len(g.Items))
-		quality := make(map[int64]float64, len(g.Items))
 		present := make(map[int64]struct{}, len(g.Items))
 		items := make([]model.ReportItem, 0, len(g.Items))
 		for _, item := range g.Items {
 			base[item.FileID] = item.Similarity
-			quality[item.FileID] = item.QualityScore
 			present[item.FileID] = struct{}{}
 			items = append(items, item)
 		}
@@ -549,7 +547,6 @@ func fuseExactGroups(similar, exact []model.ReportGroup, reps map[int64]int64, g
 					continue
 				}
 				present[sibling.FileID] = struct{}{}
-				quality[sibling.FileID] = sibling.QualityScore
 				siblings = append(siblings, sibling)
 			}
 		}
@@ -558,19 +555,6 @@ func fuseExactGroups(similar, exact []model.ReportGroup, reps map[int64]int64, g
 			continue
 		}
 
-		// Byte-identical copies share every hash and every quality score, so
-		// treat them as one candidate keyed by their representative instead of
-		// letting two copies of the same file compete in a ranking.
-		collapsed := make(map[int64]float64, len(quality))
-		for id, value := range quality {
-			key := id
-			if rep := reps[id]; rep != 0 {
-				key = rep
-			}
-			if existing, ok := collapsed[key]; !ok || value > existing {
-				collapsed[key] = value
-			}
-		}
 		// Keep the recommendation and the verdicts the group builder already
 		// produced. Each builder ranks members with rules that fit its media
 		// type — metadata quality for images and videos, file size for text —
@@ -579,8 +563,11 @@ func fuseExactGroups(similar, exact []model.ReportGroup, reps map[int64]int64, g
 		// Rescoring here is what silently replaced a larger text file, whose
 		// quality score is capped, with a smaller one.
 		winner := g.RecommendedFileID
-		if _, ok := present[winner]; !ok {
-			winner = score.Winner(collapsed)
+		// An exact group's comparison representative may only be a decodable
+		// stand-in for its recommendation. Restore the original choice when
+		// that representative wins; their byte identity preserves the scores.
+		if index, ok := groupOfRep[winner]; ok {
+			winner = exact[index].RecommendedFileID
 		}
 		baseAction := make(map[int64]model.Action, len(g.Items))
 		for _, item := range g.Items {
@@ -646,6 +633,8 @@ func dedupeGroupsByPath(groups []model.ReportGroup) []model.ReportGroup {
 	out := groups[:0]
 	for _, g := range groups {
 		items := g.Items[:0]
+		groupPaths := make(map[string]struct{}, len(g.Items))
+		groupIDs := make(map[int64]struct{}, len(g.Items))
 		for _, item := range g.Items {
 			path := filepath.Clean(item.Path)
 			if _, dup := seenPath[path]; dup {
@@ -654,12 +643,25 @@ func dedupeGroupsByPath(groups []model.ReportGroup) []model.ReportGroup {
 			if _, dup := seenID[item.FileID]; dup {
 				continue
 			}
-			seenPath[path] = struct{}{}
-			seenID[item.FileID] = struct{}{}
+			if _, dup := groupPaths[path]; dup {
+				continue
+			}
+			if _, dup := groupIDs[item.FileID]; dup {
+				continue
+			}
+			groupPaths[path] = struct{}{}
+			groupIDs[item.FileID] = struct{}{}
 			items = append(items, item)
 		}
 		if len(items) < 2 {
 			continue
+		}
+		// Discarded singletons must not hide members of a later valid group.
+		for path := range groupPaths {
+			seenPath[path] = struct{}{}
+		}
+		for id := range groupIDs {
+			seenID[id] = struct{}{}
 		}
 		dropped := len(items) != len(g.Items)
 		g.Items = items
@@ -696,6 +698,14 @@ func rescoreGroup(g *model.ReportGroup) {
 	g.RecommendedFileID = score.Winner(quality)
 	for i := range g.Items {
 		g.Items[i].Action = actions[g.Items[i].FileID]
+		if g.GroupType != model.GroupExact {
+			// Pairwise edges are no longer available here. Values measured
+			// against the removed recommendation cannot describe the new one.
+			g.Items[i].Similarity = noDirectSimilarity
+			if g.Items[i].FileID == g.RecommendedFileID {
+				g.Items[i].Similarity = 1
+			}
+		}
 	}
 }
 
@@ -718,8 +728,7 @@ func groupStableKey(g model.ReportGroup) string {
 
 // exactBucketKey groups files by size and media type only. The extension
 // decides which decoder produces a hash, never whether two files may be
-// compared: the same picture saved as .jpg and .png, or the same clip remuxed
-// to .mkv, must still meet in the exact pass.
+// compared: byte-identical copies must meet even when their suffixes differ.
 type exactBucketKey struct {
 	size  int64
 	media model.MediaType
@@ -819,7 +828,7 @@ func exactPass(
 
 	// Exact matching is restricted to files sharing size and media type; other
 	// files are never opened in this pass. Extensions are deliberately ignored:
-	// a renamed or re-containerized copy is still a byte-identical duplicate.
+	// a copy with a renamed extension is still a byte-identical duplicate.
 	candidate := make([]bool, len(files))
 	candidates := 0
 	for _, idxs := range sizeBuckets {
@@ -1271,8 +1280,8 @@ func collectImages(
 	return facts
 }
 
-// imageSimilarity compares every image against every other image regardless of
-// extension: the same picture stored as .jpg and .png must form one group.
+// imageSimilarity selects candidates across extensions using dimensions and
+// pHash, so the same picture stored as .jpg and .png can form one group.
 func imageSimilarity(facts []imageFacts, opts Options) []model.ReportGroup {
 	if len(facts) < 2 {
 		return nil
@@ -1605,9 +1614,8 @@ func copyFrame(source, destination string) error {
 	return closeErr
 }
 
-// videoSimilarity compares every video against every other video regardless of
-// extension: the same footage remuxed into another container must still be a
-// candidate.
+// videoSimilarity selects candidates by duration and dimensions regardless of
+// extension, so footage remuxed into another container can still be compared.
 func videoSimilarity(facts []videoFacts, opts Options) []model.ReportGroup {
 	if len(facts) < 2 {
 		return nil

@@ -111,7 +111,7 @@ func DefaultSettings() Settings {
 		DefaultIncludeTexts:     false,
 		DefaultTextThreshold:    0.92,
 		DefaultTextWorkers:      config.DefaultTextWorkers,
-		DefaultFrameCount:       8,
+		DefaultFrameCount:       config.DefaultFrameCount,
 		DefaultVideoCompareMode: config.DefaultVideoMode,
 		DefaultWorkers:          config.DefaultWorkers,
 		DefaultVideoWorkers:     1,
@@ -180,6 +180,7 @@ func (s *Store) load() error {
 	for _, p := range list {
 		if p != nil && p.ID != "" {
 			p.VideoCompareMode = config.NormalizeVideoMode(p.VideoCompareMode)
+			p.FrameCount = config.NormalizeFrameCount(p.FrameCount)
 			s.projects[p.ID] = p
 		}
 	}
@@ -254,7 +255,7 @@ func (s *Store) Create(in CreateInput) (Project, error) {
 		IncludeTexts:     in.IncludeTexts,
 		TextThreshold:    in.TextThreshold,
 		TextWorkers:      in.TextWorkers,
-		FrameCount:       in.FrameCount,
+		FrameCount:       config.NormalizeFrameCount(in.FrameCount),
 		VideoCompareMode: config.NormalizeVideoMode(in.VideoCompareMode),
 		Workers:          in.Workers,
 		VideoWorkers:     in.VideoWorkers,
@@ -265,9 +266,6 @@ func (s *Store) Create(in CreateInput) (Project, error) {
 	}
 	if p.Threshold <= 0 {
 		p.Threshold = config.DefaultSimilarityThreshold
-	}
-	if p.FrameCount < 1 {
-		p.FrameCount = 8
 	}
 	if p.Workers < 1 {
 		p.Workers = config.DefaultWorkers
@@ -341,7 +339,7 @@ func (s *Store) Update(id string, in UpdateInput) (Project, error) {
 		p.TextWorkers = *in.TextWorkers
 	}
 	if in.FrameCount != nil && *in.FrameCount > 0 {
-		p.FrameCount = *in.FrameCount
+		p.FrameCount = config.NormalizeFrameCount(*in.FrameCount)
 	}
 	if in.VideoCompareMode != nil {
 		p.VideoCompareMode = config.NormalizeVideoMode(*in.VideoCompareMode)
@@ -421,6 +419,7 @@ func (s *Store) LoadSettings() (Settings, error) {
 		return DefaultSettings(), err
 	}
 	st.DefaultVideoCompareMode = config.NormalizeVideoMode(st.DefaultVideoCompareMode)
+	st.DefaultFrameCount = config.NormalizeFrameCount(st.DefaultFrameCount)
 	return st, nil
 }
 
@@ -430,9 +429,7 @@ func (s *Store) SaveSettings(st Settings) error {
 	if st.DefaultThreshold <= 0 {
 		st.DefaultThreshold = config.DefaultSimilarityThreshold
 	}
-	if st.DefaultFrameCount < 1 {
-		st.DefaultFrameCount = 8
-	}
+	st.DefaultFrameCount = config.NormalizeFrameCount(st.DefaultFrameCount)
 	st.DefaultVideoCompareMode = config.NormalizeVideoMode(st.DefaultVideoCompareMode)
 	if st.DefaultWorkers < 1 {
 		st.DefaultWorkers = config.DefaultWorkers
