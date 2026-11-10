@@ -99,6 +99,8 @@ func (o *Options) context() context.Context {
 }
 
 func Scan(opts Options) (*Result, error) {
+	state := &scanProgress{onEvent: opts.OnEvent}
+	opts.OnEvent = state.emit
 	if opts.Workers < 1 {
 		opts.Workers = config.DefaultWorkers
 	}
@@ -158,13 +160,7 @@ func Scan(opts Options) (*Result, error) {
 		n := len(reportErrs)
 		errsMu.Unlock()
 		_ = c.RecordError(scanRunID, path, stage, kind, message)
-		opts.emit(progress.Event{
-			Stage:       progress.StageError,
-			Phase:       "error",
-			Message:     message,
-			Errors:      n,
-			CurrentFile: path,
-		})
+		state.recordError(path, kind, message, n)
 	}
 	errCount := func() int {
 		errsMu.Lock()
@@ -299,6 +295,7 @@ func Scan(opts Options) (*Result, error) {
 			emit(progress.Event{Stage: progress.StageImage, Phase: "running", Message: "图片 pHash 感知哈希...", Percent: 40, FilesSeen: len(files), FoundExact: exactCount, ProjectID: opts.ProjectID})
 			progressFn("image similarity pass...")
 			imageFactsList = collectImages(ctx, c, files, infos, usedPaths, hooks, opts)
+			emit(progress.Event{Stage: progress.StageImage, Phase: "running", Message: "图片特征处理完成，正在匹配相似图片...", Percent: 55, FilesSeen: len(files), FoundExact: exactCount, ProjectID: opts.ProjectID})
 			similarImageGroups = imageSimilarity(imageFactsList, opts)
 			similarCount += len(similarImageGroups)
 			emit(progress.Event{Stage: progress.StageImage, Phase: "done", Message: fmt.Sprintf("近似图片 %d 组", len(similarImageGroups)), Percent: 60, FilesSeen: len(files), FoundExact: exactCount, FoundSimilar: similarCount, ProjectID: opts.ProjectID})
@@ -1217,6 +1214,28 @@ func collectImages(
 	}
 
 	out := make([]*imageFacts, len(targets))
+	var progressMu sync.Mutex
+	processed := 0
+	var lastProgress time.Time
+	reportProgress := func(path string, finished bool) {
+		progressMu.Lock()
+		defer progressMu.Unlock()
+		if finished {
+			processed++
+		}
+		// Always publish starts so a slow decode cannot leave the previous
+		// failed file on screen. Coalesce quick completions with the next start.
+		if finished && processed < len(targets) && time.Since(lastProgress) < 100*time.Millisecond {
+			return
+		}
+		lastProgress = time.Now()
+		opts.emit(progress.Event{
+			Stage: progress.StageImage, Phase: "running",
+			Message: fmt.Sprintf("图片特征处理 %d/%d（含已跳过文件）", processed, len(targets)),
+			Current: processed, Total: len(targets), CurrentFile: path,
+			Percent: 40 + 15*float64(processed)/float64(len(targets)), FilesSeen: len(files),
+		})
+	}
 	g := errgroup.Group{}
 	g.SetLimit(opts.Workers)
 	for j, idx := range targets {
@@ -1226,6 +1245,8 @@ func collectImages(
 				return nil
 			}
 			f := files[idx]
+			reportProgress(f.Path, false)
+			defer reportProgress(f.Path, true)
 			fileID := infos[idx].fileID
 			unchanged := infos[idx].unchanged
 
