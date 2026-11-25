@@ -18,11 +18,49 @@ const (
 type GroupType string
 
 const (
-	GroupExact        GroupType = "exact"
-	GroupSimilarImage GroupType = "similar_image"
-	GroupSimilarVideo GroupType = "similar_video"
-	GroupSimilarText  GroupType = "similar_text"
+	GroupExact         GroupType = "exact"
+	GroupSimilarImage  GroupType = "similar_image"
+	GroupSimilarVideo  GroupType = "similar_video"
+	GroupSimilarText   GroupType = "similar_text"
+	GroupTextEqual     GroupType = "text_equal"
+	GroupTextContained GroupType = "text_contained"
+	GroupTextName      GroupType = "text_name"
 )
+
+func (t GroupType) IsTextAnalysis() bool {
+	return t == GroupSimilarText || t == GroupTextContained || t == GroupTextName
+}
+
+func (t GroupType) IsText() bool { return t == GroupTextEqual || t.IsTextAnalysis() }
+
+func (t GroupType) Label() string {
+	switch t {
+	case GroupExact:
+		return "精确重复"
+	case GroupSimilarImage:
+		return "视觉近似图片"
+	case GroupSimilarVideo:
+		return "视觉近似视频"
+	case GroupTextEqual:
+		return "TXT 文本一致"
+	case GroupSimilarText:
+		return "TXT 正文近似（待核对）"
+	case GroupTextContained:
+		return "TXT 内容覆盖（待核对）"
+	case GroupTextName:
+		return "TXT 书名关联（待核对）"
+	default:
+		return string(t)
+	}
+}
+
+// TextFingerprint uses a conservative text hash for equality and a separate
+// bounded shingle sample for approximate comparisons. Length counts runes.
+type TextFingerprint struct {
+	Digest   string
+	Length   int
+	Features []uint64
+}
 
 type Action string
 
@@ -87,6 +125,10 @@ type ReportItem struct {
 	ThumbPath    string
 	Reasons      []string
 }
+
+// IsCleanup is the single source for automatic selection, bulk deletion and
+// reclaimable-space estimates. Review items require explicit human selection.
+func (i ReportItem) IsCleanup() bool { return i.Action == ActionCleanup }
 
 type ReportGroup struct {
 	GroupID           int64

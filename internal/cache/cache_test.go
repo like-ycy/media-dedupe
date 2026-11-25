@@ -67,7 +67,7 @@ func TestUpsertInvalidatesAllDerivedDataOnlyOnChange(t *testing.T) {
 			c.SaveFileHash(id, file.SizeBytes, "full-hash"),
 			c.SaveVideoMetadata(id, model.VideoMetadata{DurationMs: 10000, IsReadable: true}),
 			c.SavePerceptualHashes(id, "video_frame_phash_v2_8", []string{"abc"}),
-			c.SaveTextFact(id, file.SizeBytes, 10, "name", []uint64{1, 2}),
+			c.SaveTextFact(id, file.SizeBytes, model.TextFingerprint{Length: 10, Digest: "hash", Features: []uint64{1, 2}}),
 			c.ReplaceFramePreviews(id, []string{"frame.jpg"}),
 		} {
 			if err != nil {

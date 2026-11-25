@@ -484,16 +484,14 @@ func ComputeSummary(groups []model.ReportGroup) LastSummary {
 		switch g.GroupType {
 		case model.GroupExact:
 			sum.ExactGroups++
-		case model.GroupSimilarImage, model.GroupSimilarVideo:
+		case model.GroupSimilarImage, model.GroupSimilarVideo, model.GroupSimilarText, model.GroupTextEqual, model.GroupTextContained, model.GroupTextName:
 			sum.SimilarGroups++
 		}
 		pending := g.Status == model.GroupPending || g.Status == ""
 		if pending {
 			sum.PendingGroups++
 			for _, it := range g.Items {
-				if g.RecommendedFileID > 0 && it.FileID != g.RecommendedFileID {
-					sum.ReclaimableBytes += it.SizeBytes
-				} else if g.RecommendedFileID <= 0 && it.Action == model.ActionCleanup {
+				if it.IsCleanup() {
 					sum.ReclaimableBytes += it.SizeBytes
 				}
 			}

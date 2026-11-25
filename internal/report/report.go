@@ -20,11 +20,13 @@ type JSONReport struct {
 }
 
 type jsonGroup struct {
-	ID              int64      `json:"id"`
-	Type            string     `json:"type"`
-	Confidence      float64    `json:"confidence"`
-	RecommendedKeep string     `json:"recommended_keep"`
-	Items           []jsonItem `json:"items"`
+	ID                  int64      `json:"id"`
+	Type                string     `json:"type"`
+	TypeLabel           string     `json:"type_label"`
+	ComparisonReference string     `json:"comparison_reference,omitempty"`
+	Confidence          float64    `json:"confidence"`
+	RecommendedKeep     string     `json:"recommended_keep"`
+	Items               []jsonItem `json:"items"`
 }
 
 type jsonItem struct {
@@ -83,12 +85,18 @@ func RenderJSON(groups []model.ReportGroup, errs []model.ReportError, meta model
 				Reasons:      it.Reasons,
 			})
 		}
+		reference := ""
+		if g.GroupType.IsTextAnalysis() {
+			reference, rec = rec, ""
+		}
 		payload.Groups = append(payload.Groups, jsonGroup{
-			ID:              g.GroupID,
-			Type:            string(g.GroupType),
-			Confidence:      g.Confidence,
-			RecommendedKeep: rec,
-			Items:           items,
+			ID:                  g.GroupID,
+			Type:                string(g.GroupType),
+			TypeLabel:           g.GroupType.Label(),
+			ComparisonReference: reference,
+			Confidence:          g.Confidence,
+			RecommendedKeep:     rec,
+			Items:               items,
 		})
 	}
 	b, err := json.MarshalIndent(payload, "", "  ")
@@ -104,7 +112,10 @@ func RenderText(groups []model.ReportGroup, errs []model.ReportError, meta model
 		meta.FilesSeen, meta.FilesFailed, len(groups), meta.Threshold)
 	var cleanupBytes int64
 	for _, g := range groups {
-		fmt.Fprintf(&b, "\nGroup #%d %s confidence=%.2f\n", g.GroupID, g.GroupType, g.Confidence)
+		fmt.Fprintf(&b, "\nGroup #%d %s (%s) confidence=%.2f\n", g.GroupID, g.GroupType, g.GroupType.Label(), g.Confidence)
+		if g.GroupType.IsTextAnalysis() {
+			b.WriteString("  逐对核对：对照文件不保证替代其他版本，只有明确清理候选参与批量删除。\n")
+		}
 		for _, it := range g.Items {
 			marker := " "
 			switch it.Action {
@@ -118,6 +129,9 @@ func RenderText(groups []model.ReportGroup, errs []model.ReportError, meta model
 			}
 			fmt.Fprintf(&b, "  %s %s  sim=%s quality=%.2f size=%d\n",
 				marker, it.Path, similarityText(it.Similarity), it.QualityScore, it.SizeBytes)
+			for _, reason := range it.Reasons {
+				fmt.Fprintf(&b, "      %s\n", reason)
+			}
 		}
 	}
 	if cleanupBytes > 0 {
@@ -167,7 +181,8 @@ h1 { font-size:22px; margin:0 0 8px; }
 .badge.exact { background:#1a73e8; }
 .badge.similar_image { background:#a142f4; }
 .badge.similar_video { background:#ff6d00; }
-.badge.similar_text { background:#00a67d; }
+.badge.similar_text, .badge.text_equal { background:#00a67d; }
+.badge.text_contained, .badge.text_name { background:#735b26; }
 .row { display:flex; gap:12px; flex-wrap:wrap; }
 .item { flex:1 1 220px; min-width:200px; border:1px solid var(--line); border-radius:10px; overflow:hidden; background:#12151b; }
 .item img { width:100%; aspect-ratio:4/3; object-fit:cover; display:block; background:#000; }
@@ -196,9 +211,12 @@ h1 { font-size:22px; margin:0 0 8px; }
 
 	for _, g := range groups {
 		fmt.Fprintf(&b, `<section class="group"><h2>Group #%d %s<span class="badge %s">%s</span> confidence=%.2f</h2><div class="row">`,
-			g.GroupID, html.EscapeString(string(g.GroupType)),
-			html.EscapeString(string(g.GroupType)), html.EscapeString(string(g.GroupType)),
+			g.GroupID, html.EscapeString(g.GroupType.Label()),
+			html.EscapeString(string(g.GroupType)), html.EscapeString(g.GroupType.Label()),
 			g.Confidence)
+		if g.GroupType.IsTextAnalysis() {
+			b.WriteString(`<p class="muted">逐对核对：对照文件不保证替代所有版本；正文覆盖和书名关联不代表文件相同。</p>`)
+		}
 		for _, it := range g.Items {
 			thumb := previewHTML(it.Path, it.ThumbPath, thumbRel)
 			fmt.Fprintf(&b, `<div class="item">%s<div class="meta">

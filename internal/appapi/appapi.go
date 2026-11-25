@@ -121,6 +121,7 @@ type GroupListDTO struct {
 	RecommendedFileID int64   `json:"recommendedFileId"`
 	Status            string  `json:"status"`
 	MemberCount       int     `json:"memberCount"`
+	CleanupCount      int     `json:"cleanupCount"`
 	ReclaimableBytes  int64   `json:"reclaimableBytes"`
 	CoverThumbURL     string  `json:"coverThumbUrl"`
 	TypeLabel         string  `json:"typeLabel"`
@@ -698,20 +699,7 @@ func (a *App) openProjectCache(projectID string) (*cache.Cache, error) {
 	return cache.Open(a.store.CachePath(projectID))
 }
 
-func groupTypeLabel(t string) string {
-	switch t {
-	case "exact":
-		return "精确重复"
-	case "similar_image":
-		return "视觉近似图片"
-	case "similar_video":
-		return "视觉近似视频"
-	case "similar_text":
-		return "文本近似重复"
-	default:
-		return t
-	}
-}
+func groupTypeLabel(t string) string { return model.GroupType(t).Label() }
 
 func (a *App) mediaURLFromPath(path string) string {
 	if path == "" || a.media == nil {
@@ -802,11 +790,13 @@ func (a *App) ListGroups(projectID string, filter GroupFilter) ([]GroupListDTO, 
 			}
 		}
 		var reclaim int64
+		cleanupCount := 0
 		var cover string
 		var hasImage, hasVideo, hasText bool
 		for _, it := range g.Items {
-			if g.RecommendedFileID > 0 && it.FileID != g.RecommendedFileID {
+			if it.IsCleanup() {
 				reclaim += it.SizeBytes
+				cleanupCount++
 			}
 			if mt, ok := discovery.Classify(it.Path); ok {
 				switch mt {
@@ -844,6 +834,7 @@ func (a *App) ListGroups(projectID string, filter GroupFilter) ([]GroupListDTO, 
 			RecommendedFileID: g.RecommendedFileID,
 			Status:            status,
 			MemberCount:       len(g.Items),
+			CleanupCount:      cleanupCount,
 			ReclaimableBytes:  reclaim,
 			CoverThumbURL:     cover,
 			TypeLabel:         groupTypeLabel(string(g.GroupType)),
@@ -869,7 +860,7 @@ func (a *App) ListGroups(projectID string, filter GroupFilter) ([]GroupListDTO, 
 	return out, nil
 }
 
-// expandCandidatePaths resolves group IDs to their non-recommended members so
+// expandCandidatePaths resolves group IDs to their explicit cleanup candidates so
 // bulk delete can run without the UI collecting paths first.
 func (a *App) expandCandidatePaths(projectID string, groupIDs []int64) ([]string, []int64, error) {
 	c, err := a.openProjectCache(projectID)
@@ -892,7 +883,7 @@ func (a *App) expandCandidatePaths(projectID string, groupIDs []int64) ([]string
 			continue
 		}
 		for _, it := range g.Items {
-			if it.FileID == g.RecommendedFileID {
+			if !it.IsCleanup() || it.FileID == g.RecommendedFileID {
 				continue
 			}
 			paths = append(paths, it.Path)
@@ -988,7 +979,7 @@ func (a *App) GetGroup(projectID string, groupID int64) (GroupDetailDTO, error) 
 			}
 		}
 		detail.Items = append(detail.Items, item)
-		if g.RecommendedFileID > 0 && it.FileID != g.RecommendedFileID {
+		if it.IsCleanup() {
 			detail.ReclaimableBytes += it.SizeBytes
 		}
 	}
@@ -1076,7 +1067,7 @@ func (a *App) DeleteFiles(req DeleteRequestDTO) (DeleteResultDTO, error) {
 	}
 	paths := req.Paths
 	// Bulk delete from the results list only needs group IDs: expand to each
-	// group's non-recommended members here so the UI never ships path lists.
+	// group's explicit cleanup candidates, leaving review items untouched.
 	if len(paths) == 0 && len(req.GroupIDs) > 0 {
 		expanded, fileIDs, err := a.expandCandidatePaths(req.ProjectID, req.GroupIDs)
 		if err != nil {
@@ -1153,9 +1144,27 @@ func (a *App) DeleteFiles(req DeleteRequestDTO) (DeleteResultDTO, error) {
 						alive++
 					}
 				}
-				if alive >= 1 && alive < len(g.Items) {
+				if alive >= 1 && alive < len(g.Items) && (!g.GroupType.IsTextAnalysis() || alive == 1) {
 					if err := c.SetGroupStatus(g.GroupID, model.GroupProcessed); err == nil {
 						out.MarkedProcessed = append(out.MarkedProcessed, g.GroupID)
+					}
+				}
+				if g.GroupType.IsTextAnalysis() {
+					// Removing one equivalence-class representative invalidates
+					// its cleanup dependants even if the group reference survived.
+					var removed []string
+					for _, it := range g.Items {
+						if okSet[it.Path] {
+							removed = append(removed, it.Path)
+						}
+					}
+					if _, err := c.DeleteFilesByPaths(removed); err != nil {
+						_ = c.Close()
+						return out, fmt.Errorf("文件已删除，但更新 TXT 结果失败，请重新扫描：%w", err)
+					}
+					if err := c.PruneReportGroups(); err != nil {
+						_ = c.Close()
+						return out, fmt.Errorf("文件已删除，但修复 TXT 结果失败，请重新扫描：%w", err)
 					}
 				}
 			}
@@ -1197,6 +1206,19 @@ func (a *App) validateGroupDeletes(req DeleteRequestDTO) error {
 			continue
 		}
 		alive := 0
+		if g.GroupType.IsTextAnalysis() {
+			// A mixed group can contain several different books/editions. A
+			// remaining unrelated reference cannot stand in for a missing copy
+			// that justified cleaning one of the group's equality classes.
+			for _, it := range g.Items {
+				if it.IsCleanup() || del[it.Path] {
+					continue
+				}
+				if _, err := os.Stat(it.Path); err != nil {
+					return fmt.Errorf("组 #%d 的核对文件已不可访问，请重新扫描后再删除：%s", g.GroupID, it.Path)
+				}
+			}
+		}
 		for _, it := range g.Items {
 			if !del[it.Path] {
 				if _, err := os.Stat(it.Path); err == nil {

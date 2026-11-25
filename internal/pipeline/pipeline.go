@@ -24,6 +24,7 @@ import (
 	imgutil "media-dedupe/internal/imagehash"
 	"media-dedupe/internal/match"
 	"media-dedupe/internal/model"
+	"media-dedupe/internal/novelname"
 	"media-dedupe/internal/progress"
 	"media-dedupe/internal/score"
 	"media-dedupe/internal/textdedupe"
@@ -329,7 +330,7 @@ func Scan(opts Options) (*Result, error) {
 	}
 	var similarTextGroups []model.ReportGroup
 	if opts.IncludeTexts && ctx.Err() == nil {
-		emit(progress.Event{Stage: progress.StageText, Phase: "running", Message: "TXT 正文相似度分析...", Percent: 82, FilesSeen: len(files), ProjectID: opts.ProjectID})
+		emit(progress.Event{Stage: progress.StageText, Phase: "running", Message: "TXT 文本哈希、正文覆盖与书名分析...", Percent: 82, FilesSeen: len(files), ProjectID: opts.ProjectID})
 		textFiles := make([]model.DiscoveredFile, 0)
 		textIDs := make([]int64, 0)
 		textUnchanged := make([]bool, 0)
@@ -344,7 +345,7 @@ func Scan(opts Options) (*Result, error) {
 			textIDs = append(textIDs, infos[i].fileID)
 			textUnchanged = append(textUnchanged, infos[i].unchanged)
 		}
-		facts, textErrs := textdedupe.FactsCached(textFiles, textIDs, textUnchanged, opts.TextWorkers, c)
+		facts, textErrs := textdedupe.FactsCachedContext(ctx, textFiles, textIDs, textUnchanged, opts.TextWorkers, c)
 		for _, textErr := range textErrs {
 			// Cache read/write problems are program-level; read failures are
 			// ordinary bad files and keep their errno for classification.
@@ -354,16 +355,21 @@ func Scan(opts Options) (*Result, error) {
 			}
 			hooks.file(textErr.Path, textErr.Stage, textErr.Err)
 		}
-		factsByExtension := make(map[string][]textdedupe.Fact)
-		for _, fact := range facts {
-			extension := strings.ToLower(filepath.Ext(fact.Path))
-			factsByExtension[extension] = append(factsByExtension[extension], fact)
+		// Byte-equal siblings may carry the useful title even if the representative
+		// was renamed. Use all their names without re-reading duplicate content.
+		for i := range facts {
+			if groupIndex, ok := exact.groupOfRep[facts[i].FileID]; ok {
+				for _, item := range exactGroups[groupIndex].Items {
+					if item.FileID != facts[i].FileID {
+						facts[i].Names = append(facts[i].Names, novelname.Parse(filepath.Base(item.Path)))
+					}
+				}
+			}
 		}
-		for _, facts := range factsByExtension {
-			similarTextGroups = append(similarTextGroups, textdedupe.Groups(facts, opts.TextThreshold)...)
-		}
+		similarTextGroups = textdedupe.GroupsContext(ctx, facts, opts.TextThreshold)
+
 		similarCount += len(similarTextGroups)
-		emit(progress.Event{Stage: progress.StageText, Phase: "done", Message: fmt.Sprintf("文本近似重复 %d 组", len(similarTextGroups)), Percent: 84, FilesSeen: len(files), FoundSimilar: similarCount, ProjectID: opts.ProjectID})
+		emit(progress.Event{Stage: progress.StageText, Phase: "done", Message: fmt.Sprintf("TXT 文本与书名关联 %d 组", len(similarTextGroups)), Percent: 84, FilesSeen: len(files), FoundSimilar: similarCount, ProjectID: opts.ProjectID})
 	}
 
 	if err := abortIfFatal(len(files)); err != nil {
@@ -605,6 +611,18 @@ func fuseExactGroups(similar, exact []model.ReportGroup, reps map[int64]int64, g
 			if action == model.ActionKeep && items[i].FileID != winner {
 				action = model.ActionCleanup
 			}
+			if g.GroupType.IsText() {
+				// Exact siblings remain confirmed duplicates even when their
+				// representative needs review against another edition.
+				if _, existed := baseAction[items[i].FileID]; !existed {
+					action = model.ActionCleanup
+				}
+				if items[i].FileID == winner {
+					action = baseAction[g.RecommendedFileID]
+				} else if items[i].FileID == g.RecommendedFileID && winner != g.RecommendedFileID {
+					action = model.ActionCleanup
+				}
+			}
 			items[i].Action = action
 			if _, merged := mergedReps[items[i].FileID]; merged {
 				items[i].Reasons = append(append([]string{}, items[i].Reasons...), "byte-identical copies of this file are in this group")
@@ -688,13 +706,18 @@ func rescoreGroup(g *model.ReportGroup) {
 		quality[it.FileID] = it.QualityScore
 	}
 	reviewDelta := 0.0
-	if g.GroupType == model.GroupExact {
+	if g.GroupType == model.GroupExact || g.GroupType == model.GroupTextEqual {
 		reviewDelta = -1.0
 	}
 	actions := score.ChooseActions(quality, reviewDelta)
 	g.RecommendedFileID = score.Winner(quality)
 	for i := range g.Items {
 		g.Items[i].Action = actions[g.Items[i].FileID]
+		if g.GroupType.IsTextAnalysis() {
+			// The removed member may have been the retained representative of
+			// an equality class. Its dependants are no longer auto-cleanable.
+			g.Items[i].Action = model.ActionReview
+		}
 		if g.GroupType != model.GroupExact {
 			// Pairwise edges are no longer available here. Values measured
 			// against the removed recommendation cannot describe the new one.

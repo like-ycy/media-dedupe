@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS text_facts (
     name_key TEXT NOT NULL,
     features_json TEXT,
     features_blob BLOB,
+    text_hash TEXT NOT NULL DEFAULT '',
     version INTEGER NOT NULL DEFAULT 1,
     FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
 );
@@ -162,6 +163,34 @@ CREATE INDEX IF NOT EXISTS idx_files_size ON files(size_bytes);
 	// Older caches stored text features as JSON arrays (very large). Prefer
 	// packed uint64 blobs; keep the JSON column readable for legacy rows.
 	_, _ = c.db.Exec(`ALTER TABLE text_facts ADD COLUMN features_blob BLOB`)
+	// Unlike historical best-effort migrations, this column is required by every
+	// new text read/write. Inspect first and propagate failures to the caller.
+	rows, err := c.db.Query(`SELECT name FROM pragma_table_info('text_facts')`)
+	if err != nil {
+		return err
+	}
+	hasTextHash := false
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "text_hash" {
+			hasTextHash = true
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	if !hasTextHash {
+		if _, err := c.db.Exec(`ALTER TABLE text_facts ADD COLUMN text_hash TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+
 	_, _ = c.db.Exec(`
 CREATE TABLE IF NOT EXISTS delete_ops (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -234,6 +263,13 @@ func (c *Cache) DeleteFilesByPaths(paths []string) (int, error) {
 	defer func() { _ = tx.Rollback() }()
 	deleted := 0
 	for _, path := range paths {
+		// A removed member may be the retained copy of a text-equivalence
+		// class, even when it is not the group's comparison reference.
+		if _, err := tx.Exec(`UPDATE duplicate_items SET action = 'review_required'
+WHERE group_id IN (SELECT i.group_id FROM duplicate_items i JOIN files f ON f.id = i.file_id
+ JOIN duplicate_groups g ON g.id = i.group_id WHERE f.path = ? AND g.group_type IN ('similar_text','text_contained','text_name'))`, path); err != nil {
+			return deleted, err
+		}
 		if _, err := tx.Exec(`DELETE FROM frame_previews WHERE file_id IN (SELECT id FROM files WHERE path = ?)`, path); err != nil {
 			return deleted, err
 		}
@@ -343,7 +379,7 @@ ORDER BY i.quality_score DESC, i.file_id ASC LIMIT 1`, g.id).Scan(&fileID); err 
 		}
 		// Exact groups keep their stored level: equal bytes (or an equal
 		// sampled fingerprint) do not depend on which copy is kept.
-		if model.GroupType(g.groupType) == model.GroupExact {
+		if model.GroupType(g.groupType) == model.GroupExact || model.GroupType(g.groupType) == model.GroupTextEqual {
 			continue
 		}
 		if _, err := tx.Exec(`
@@ -496,56 +532,34 @@ func (c *Cache) LoadQuickHash(fileID, sizeBytes int64) (string, bool, error) {
 	return strings.TrimPrefix(quick.String, quickHashVersion), true, nil
 }
 
-// textFactVersion invalidates legacy JSON feature rows (v2 and earlier)
-// so a rescan rewrites them as compact blobs.
-const textFactVersion = 3
+// Version 4 uses conservative text SHA-256, rune lengths and mixed shingle hashes.
+const textFactVersion = 4
 
-func (c *Cache) SaveTextFact(fileID, sizeBytes int64, length int, name string, features []uint64) error {
-	blob := encodeFeatures(features)
-	// features_json stays empty for new rows; older schemas require a value.
+func (c *Cache) SaveTextFact(fileID, sizeBytes int64, fact model.TextFingerprint) error {
 	_, err := c.db.Exec(`
-INSERT INTO text_facts (file_id, size_bytes, normalized_length, name_key, features_blob, features_json, version)
-VALUES (?, ?, ?, ?, ?, '', ?)
+INSERT INTO text_facts (file_id, size_bytes, normalized_length, name_key, features_blob, features_json, version, text_hash)
+VALUES (?, ?, ?, '', ?, '', ?, ?)
 ON CONFLICT(file_id) DO UPDATE SET
-  size_bytes=excluded.size_bytes,
-  normalized_length=excluded.normalized_length,
-  name_key=excluded.name_key,
-  features_blob=excluded.features_blob,
-  features_json='',
-  version=excluded.version
-`, fileID, sizeBytes, length, name, blob, textFactVersion)
+ size_bytes=excluded.size_bytes, normalized_length=excluded.normalized_length,
+ name_key='', features_blob=excluded.features_blob, features_json='',
+ version=excluded.version, text_hash=excluded.text_hash
+`, fileID, sizeBytes, fact.Length, encodeFeatures(fact.Features), textFactVersion, fact.Digest)
 	return err
 }
 
-func (c *Cache) LoadTextFact(fileID, sizeBytes int64) (name string, length int, features []uint64, ok bool, err error) {
-	var (
-		blob []byte
-		raw  sql.NullString
-	)
-	err = c.db.QueryRow(`
-SELECT name_key, normalized_length, features_blob, features_json
-FROM text_facts WHERE file_id = ? AND size_bytes = ? AND version = ?
-`, fileID, sizeBytes, textFactVersion).Scan(&name, &length, &blob, &raw)
+func (c *Cache) LoadTextFact(fileID, sizeBytes int64) (model.TextFingerprint, bool, error) {
+	var fact model.TextFingerprint
+	var blob []byte
+	err := c.db.QueryRow(`SELECT normalized_length, features_blob, text_hash
+FROM text_facts WHERE file_id = ? AND size_bytes = ? AND version = ?`, fileID, sizeBytes, textFactVersion).Scan(&fact.Length, &blob, &fact.Digest)
 	if err == sql.ErrNoRows {
-		return "", 0, nil, false, nil
+		return fact, false, nil
 	}
 	if err != nil {
-		return "", 0, nil, false, err
+		return fact, false, err
 	}
-	if len(blob) > 0 {
-		features, err = decodeFeatures(blob)
-		if err != nil {
-			return "", 0, nil, false, err
-		}
-		return name, length, features, true, nil
-	}
-	if raw.Valid && raw.String != "" {
-		if err = json.Unmarshal([]byte(raw.String), &features); err != nil {
-			return "", 0, nil, false, err
-		}
-		return name, length, features, true, nil
-	}
-	return name, length, nil, true, nil
+	fact.Features, err = decodeFeatures(blob)
+	return fact, err == nil, err
 }
 
 func encodeFeatures(features []uint64) []byte {
@@ -877,8 +891,21 @@ func (c *Cache) UpdateRecommended(groupID, fileID int64) error {
 	if err := tx.QueryRow(`SELECT group_type FROM duplicate_groups WHERE id = ?`, groupID).Scan(&groupType); err != nil {
 		return err
 	}
+	var memberCount int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM duplicate_items WHERE group_id = ? AND file_id = ?`, groupID, fileID).Scan(&memberCount); err != nil {
+		return err
+	}
+	if memberCount != 1 {
+		return fmt.Errorf("推荐文件不属于此组")
+	}
 	if _, err := tx.Exec(`UPDATE duplicate_groups SET recommended_file_id = ? WHERE id = ?`, fileID, groupID); err != nil {
 		return err
+	}
+	if model.GroupType(groupType).IsTextAnalysis() {
+		if _, err := tx.Exec(`UPDATE duplicate_items SET action = ?, similarity = ? WHERE group_id = ?`, string(model.ActionReview), similarityToUnknown, groupID); err != nil {
+			return err
+		}
+		return tx.Commit()
 	}
 	if _, err := tx.Exec(`UPDATE duplicate_items SET action = ? WHERE group_id = ?`, string(model.ActionKeep), groupID); err != nil {
 		return err
@@ -886,7 +913,7 @@ func (c *Cache) UpdateRecommended(groupID, fileID int64) error {
 	if _, err := tx.Exec(`UPDATE duplicate_items SET action = ? WHERE group_id = ? AND file_id != ?`, string(model.ActionCleanup), groupID, fileID); err != nil {
 		return err
 	}
-	if model.GroupType(groupType) == model.GroupExact {
+	if model.GroupType(groupType) == model.GroupExact || model.GroupType(groupType) == model.GroupTextEqual {
 		return tx.Commit()
 	}
 	if _, err := tx.Exec(`UPDATE duplicate_items SET similarity = ? WHERE group_id = ? AND file_id = ?`, 1.0, groupID, fileID); err != nil {
