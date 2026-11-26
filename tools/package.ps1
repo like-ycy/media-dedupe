@@ -31,7 +31,17 @@ Get-Content (Join-Path $PSScriptRoot 'config.env') | ForEach-Object {
     if ($line -eq '' -or $line.StartsWith('#')) { return }
     $i = $line.IndexOf('=')
     if ($i -lt 1) { return }
-    $Config[$line.Substring(0, $i).Trim()] = $line.Substring($i + 1).Trim()
+    $key = $line.Substring(0, $i).Trim()
+    $value = $line.Substring($i + 1).Trim()
+    # config.env 同时喂给 bash，多值只能写成 COMPONENTS="scraper dlre"（不写引号
+    # 会被 source 拆成命令）。PowerShell 拿到的是带引号的字面量，不剥掉就会拼出
+    # third_party\"scraper"\windows-amd64 这种路径。
+    if ($value.Length -ge 2 -and
+        (($value.StartsWith('"') -and $value.EndsWith('"')) -or
+         ($value.StartsWith("'") -and $value.EndsWith("'")))) {
+        $value = $value.Substring(1, $value.Length - 2)
+    }
+    $Config[$key] = $value
 }
 $Slug = $Config['SLUG']
 $Product = $Config['PRODUCT']
