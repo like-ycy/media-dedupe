@@ -13,30 +13,41 @@ import (
 
 func TestMatchAsset(t *testing.T) {
 	assets := []ReleaseAsset{
-		{Name: "media-dedupe-app_1.2.0_darwin_arm64.zip", BrowserDownloadURL: "https://example.com/a"},
-		{Name: "media-dedupe-app_1.2.0_darwin_amd64.zip", BrowserDownloadURL: "https://example.com/b"},
-		{Name: "media-dedupe-app_1.2.0_windows_amd64.zip", BrowserDownloadURL: "https://example.com/c"},
+		{Name: "media-dedupe_1.2.0_darwin_arm64.zip", BrowserDownloadURL: "https://example.com/a"},
+		{Name: "media-dedupe_1.2.0_darwin_amd64.zip", BrowserDownloadURL: "https://example.com/b"},
+		{Name: "media-dedupe_1.2.0_windows_amd64.zip", BrowserDownloadURL: "https://example.com/c"},
 		{Name: "SHA256SUMS.txt", BrowserDownloadURL: "https://example.com/s"},
 		{Name: "aap_1.2.0_darwin_arm64.zip", BrowserDownloadURL: "https://example.com/old"},
 	}
 
 	got := matchAsset(assets, "darwin", "arm64")
-	if got == nil || got.Name != "media-dedupe-app_1.2.0_darwin_arm64.zip" {
+	if got == nil || got.Name != "media-dedupe_1.2.0_darwin_arm64.zip" {
 		t.Fatalf("darwin/arm64 match = %+v", got)
 	}
 
 	got = matchAsset(assets, "darwin", "amd64")
-	if got == nil || got.Name != "media-dedupe-app_1.2.0_darwin_amd64.zip" {
+	if got == nil || got.Name != "media-dedupe_1.2.0_darwin_amd64.zip" {
 		t.Fatalf("darwin/amd64 match = %+v", got)
 	}
 
 	got = matchAsset(assets, "windows", "amd64")
-	if got == nil || got.Name != "media-dedupe-app_1.2.0_windows_amd64.zip" {
+	if got == nil || got.Name != "media-dedupe_1.2.0_windows_amd64.zip" {
 		t.Fatalf("windows/amd64 match = %+v", got)
 	}
 
 	if matchAsset(assets, "linux", "amd64") != nil {
 		t.Fatal("expected nil for unsupported platform")
+	}
+}
+
+// 旧 Release 用的是 media-dedupe-app_ 前缀，回滚或对照旧包时必须还能认出来。
+func TestMatchAssetAcceptsLegacyPrefix(t *testing.T) {
+	assets := []ReleaseAsset{
+		{Name: "media-dedupe-app_1.2.0_darwin_arm64.zip"},
+	}
+	got := matchAsset(assets, "darwin", "arm64")
+	if got == nil || got.Name != "media-dedupe-app_1.2.0_darwin_arm64.zip" {
+		t.Fatalf("legacy prefix match = %+v", got)
 	}
 }
 
@@ -63,7 +74,7 @@ func TestCheckUpdate(t *testing.T) {
 		"html_url": "https://github.com/like-ycy/media-dedupe/releases/tag/v9.9.9",
 		"assets": []map[string]any{
 			{
-				"name":                 "media-dedupe-app_9.9.9_" + runtime.GOOS + "_" + runtime.GOARCH + ".zip",
+				"name":                 "media-dedupe_9.9.9_" + runtime.GOOS + "_" + runtime.GOARCH + ".zip",
 				"size":                 1234,
 				"browser_download_url": "https://example.com/pkg",
 			},
@@ -111,7 +122,7 @@ func TestCheckUpdateRecordsChecksumsURL(t *testing.T) {
 		"tag_name": "v9.9.9",
 		"assets": []map[string]any{
 			{
-				"name":                 "media-dedupe-app_9.9.9_" + runtime.GOOS + "_" + runtime.GOARCH + ".zip",
+				"name":                 "media-dedupe_9.9.9_" + runtime.GOOS + "_" + runtime.GOARCH + ".zip",
 				"size":                 1234,
 				"browser_download_url": "https://example.com/pkg",
 			},

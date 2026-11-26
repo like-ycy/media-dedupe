@@ -1,56 +1,67 @@
-# Build output
-bin/
-build/bin/
-/media-dedupe
-/media-dedupe.exe
-/media-dedupe-app
-*.exe
-*.test
-*.out
-coverage.out
-coverage.html
-profile.cov
-frontend/dist/
+# 仓库结构与打包契约见 docs/packaging-contract.md
+#
+# 原则：只提交「源码 + 配置 + 锁文件 + Wails 脚手架」。
+# 带前导 / 的规则都是仓库根锚定的，这是刻意的：裸写 build/ 会连 go/build/ 一起忽略，
+# 而 go/build/ 里的 appicon.png、darwin/、windows/ 是 wails build 必需的源文件。
+# 四个仓库共用同一份规则，仅有末尾「项目特有」一节不同。
 
-# Frontend install cache / local npm state
-frontend/node_modules/
-frontend/package.json.md5
+# ── Go / Wails ──
+/go/build/bin/
+/go/frontend/wailsjs/
+/go/frontend/dist/
+/go/frontend/node_modules/
+/go/frontend/package.json.md5
+/go/.gocache-test/
+vendor/
 
-# Wails generated bindings
-frontend/wailsjs/
+# ── Python（模板 B）──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.venv/
+/python/.venv/
+/python/build/
 
-# Local SQLite cache (WAL sidecars too)
+# ── 测试与工具缓存 ──
+.pytest_cache/
+.ruff_cache/
+
+# ── 组件与分发产物（tools/*.sh 的输出）──
+/dist/
+
+# ── 运行时数据 ──
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
-*.db
-
-# Generated reports / thumbs (if written under the repo)
+*.log
 reports/
-thumbs/
 latest.html
 latest.json
 latest.txt
 
-# Stress / scratch fixtures (regenerate via tmp_stress/generate_stress.py)
-tmp_stress/
-
-# Local sample media (not required for build/test)
-testdata/
-
-# OS
+# ── OS / 编辑器 / 本地工具 ──
 .DS_Store
 Thumbs.db
-
-# Editors / IDE
 .idea/
 .vscode/
 *.swp
+*.swo
 *~
-
-# Go workspace / vendor noise
-vendor/
 .serena/
-tests/
-**/*_test.go
 .workbuddy/
+
+# ── 项目特有 ──
+# 本地 AI 会话记录（临时产物，不入库）
+/codex-session-*.md
+# 旧布局残留：仓库根直接落地的可执行文件与归档（新产物一律进 dist/）
+/*.exe
+/*.zip
+# 压力测试与本地样本（用 tmp_stress/generate_stress.py 重新生成）
+tmp_stress/
+testdata/

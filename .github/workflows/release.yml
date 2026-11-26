@@ -1,5 +1,13 @@
 name: Release
 
+# 构建与打包全部收在 tools/build.sh（macOS）与 tools\build.ps1（Windows）里：
+# 本地一条命令能复现的东西，才有资格只在 CI 里跑一次。这个 workflow 只负责
+# 「换平台 → 调脚本 → 断言产物 → 传 artifact」，不重复写 wails 参数与文件名。
+#
+# 产物命名（与 go/internal/updater 的资产匹配一致）：
+#   media-dedupe_<ver>_<goos>_<goarch>.zip
+# 平台段取 GOOS，不改写成 "macos"：更新器按 runtime.GOOS 拼后缀找资产。
+
 on:
   push:
     tags:
@@ -19,21 +27,18 @@ jobs:
           - goos: darwin
             goarch: arm64
             runner: macos-latest
-            ext: ""
           - goos: darwin
             goarch: amd64
             runner: macos-latest
-            ext: ""
           - goos: windows
             goarch: amd64
             runner: windows-latest
-            ext: ".exe"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          # 需要完整 tag 信息，保证与本地一样从 Git tag 解析版本。
+          # 需要完整 tag 信息，脚本靠 git describe 解析版本号。
           fetch-depth: 0
 
       - name: Validate release tag
@@ -53,7 +58,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version-file: go/go.mod
           cache: true
 
       - name: Setup Node
@@ -63,84 +68,46 @@ jobs:
 
       - name: Install Wails CLI
         shell: bash
-        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      - name: Build desktop app
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: tools/build.sh
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\tools\build.ps1
+
+      # 结构断言：目录名或可执行名对不上时，用户那边表现为「双击没反应」，
+      # 而构建日志一片绿 —— 所以必须在产物上真查一遍。
+      - name: Assert layout
         shell: bash
         run: |
-          # 版本从当前 Git tag 解析，与本地可手动使用的 ldflags 保持一致。
-          VERSION="$(git describe --tags --exact-match | sed 's/^v//')"
-          export PATH="$(go env GOPATH)/bin:$PATH"
-          OUT="media-dedupe-app${{ matrix.ext }}"
+          set -euo pipefail
+          version="$(git describe --tags --exact-match | sed 's/^v//')"
+          asset="dist/release/media-dedupe_${version}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
+          test -f "$asset" || { echo "缺少归档：$asset"; ls -R dist/release; exit 1; }
 
-          # Keep packaging metadata aligned with the git tag.
-          PYTHON_BIN=""
-          if command -v python3 >/dev/null 2>&1; then
-            PYTHON_BIN=python3
-          elif command -v python >/dev/null 2>&1; then
-            PYTHON_BIN=python
+          names="$(unzip -Z1 "$asset" 2>/dev/null || python3 -c 'import zipfile,sys;print("\n".join(zipfile.ZipFile(sys.argv[1]).namelist()))' "$asset")"
+          if [ "${{ matrix.goos }}" = "darwin" ]; then
+            echo "$names" | grep -q "^media-dedupe\.app/Contents/MacOS/media-dedupe$" ||
+              { echo "归档里没有 .app 内的可执行文件"; echo "$names" | head -20; exit 1; }
           else
-            echo "Python is required to update wails.json productVersion"
-            exit 1
+            echo "$names" | grep -qx "media-dedupe.exe" || { echo "归档根缺少 media-dedupe.exe"; exit 1; }
           fi
-          "$PYTHON_BIN" - "$VERSION" <<'PY'
-          import json
-          import sys
-          from pathlib import Path
+          stray="$(echo "$names" | grep -v "^media-dedupe" || true)"
+          if [ -n "$stray" ]; then echo "归档顶层出现多余条目：$stray"; exit 1; fi
 
-          version = sys.argv[1]
-          path = Path("wails.json")
-          data = json.loads(path.read_text(encoding="utf-8"))
-          data.setdefault("info", {})["productVersion"] = version
-          path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-          PY
-
-          # No -nsis: Windows ships as a single portable exe.
-          # 注入版本号到 internal/version.Version，供更新检查使用。
-          # 传入完整文件名（含 .exe），避免 Wails 2.16 在 Windows 上省略扩展名。
-          wails build -platform "${{ matrix.goos }}/${{ matrix.goarch }}" \
-            -ldflags "-X media-dedupe/internal/version.Version=${VERSION}" \
-            -o "${OUT}"
-
-          mkdir -p out
-          ASSET="media-dedupe-app_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
-
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            if [ -f "build/bin/${OUT}" ]; then
-              BIN="build/bin/${OUT}"
-            else
-              BIN="${OUT}"
-            fi
-            test -f "$BIN"
-            ls -la build/bin "$BIN" || true
-            # Windows runner 可能没有 Info-ZIP，统一用 Python zipfile 打单文件包
-            "$PYTHON_BIN" - "$BIN" "out/${ASSET}" <<'PY'
-          import sys
-          import zipfile
-          from pathlib import Path
-
-          bin_path = Path(sys.argv[1])
-          out_path = Path(sys.argv[2])
-          with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-              zf.write(bin_path, bin_path.name)
-          PY
-          else
-            APP="build/bin/media-dedupe-app.app"
-            if [ ! -d "$APP" ]; then
-              APP="build/bin/media-dedupe.app"
-            fi
-            test -d "$APP"
-            ls -la build/bin "$APP" || true
-            # -y 保留 .app 内符号链接，-X 不写入 macOS 扩展属性
-            OUT_ABS="$(cd out && pwd)/${ASSET}"
-            (cd build/bin && zip -r -y -X "$OUT_ABS" "$(basename "$APP")")
-          fi
-
-      - name: Upload app artifact
+      - name: Upload archive
         uses: actions/upload-artifact@v7
         with:
           name: media-dedupe-app-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: out/*
+          # 只传 zip：SHA256SUMS.txt 在 release job 里跨平台统一生成一次，
+          # 每个 job 各传一份同名文件会让合并时互相覆盖。
+          path: dist/release/*.zip
           if-no-files-found: error
 
   release:
@@ -157,7 +124,7 @@ jobs:
       - name: Checksums
         working-directory: release-assets
         run: |
-          sha256sum * > SHA256SUMS.txt
+          sha256sum *.zip > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Publish GitHub Release

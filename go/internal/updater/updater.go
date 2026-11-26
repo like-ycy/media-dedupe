@@ -175,13 +175,18 @@ func findChecksumsAsset(assets []ReleaseAsset) *ReleaseAsset {
 }
 
 // matchAsset 匹配当前系统平台与架构对应的资产。
-// 命名约定（与 release.yml 一致）：media-dedupe-app_{ver}_{goos}_{goarch}.zip
+// 命名约定（与 tools/package.sh 一致）：media-dedupe_{ver}_{goos}_{goarch}.zip
+//
+// 旧版本用的是 media-dedupe-app_ 前缀，这里一并认：回滚到旧 Release、或某个
+// 版本忘了改前缀时，代价不该是「整条自更新链路静默失效」。
 func matchAsset(assets []ReleaseAsset, goos, goarch string) *ReleaseAsset {
 	wantSuffix := "_" + goos + "_" + goarch + ".zip"
-	for i := range assets {
-		name := strings.ToLower(assets[i].Name)
-		if strings.HasPrefix(name, "media-dedupe-app_") && strings.HasSuffix(name, wantSuffix) {
-			return &assets[i]
+	for _, prefix := range []string{"media-dedupe_", "media-dedupe-app_"} {
+		for i := range assets {
+			name := strings.ToLower(assets[i].Name)
+			if strings.HasPrefix(name, prefix) && strings.HasSuffix(name, wantSuffix) {
+				return &assets[i]
+			}
 		}
 	}
 	return nil

@@ -8,47 +8,48 @@
 
 ## 构建
 
-产品只构建桌面 App，不再发布 CLI 工具（仓库中仍保留 `cmd/media-dedupe` 与 `internal/cli` 便于本地调试）。
+产品只构建桌面 App，不再发布 CLI 工具（仓库中仍保留 `go/cmd/media-dedupe` 与 `go/internal/cli` 便于本地调试）。
 
-依赖：Go 1.27+（见 `go.mod`）。视频能力需要系统安装 `ffmpeg` / `ffprobe`。
+依赖：Go 1.27+（见 `go/go.mod`）、Node 22+、Wails CLI。视频能力需要系统安装 `ffmpeg` / `ffprobe`。
 
-### 本机构建（macOS）
+### 本机构建
+
+所有构建入口都在 `tools/`，CI 调的也是这两个脚本 —— 本地能复现的东西才允许只在 CI 跑一次。
 
 ```bash
-# 安装/升级 Wails CLI（可选）
-# go install github.com/wailsapp/wails/v2/cmd/wails@latest
-
-# 生产构建（本机架构；产出 build/bin/media-dedupe-app.app）
-# 本地测试构建：版本默认为 0.0.0-dev，不会误报成正式版
-wails build -o media-dedupe-app
-
-# 若本机也要测“正式版本号”，从当前 Git tag 注入：
-wails build -o media-dedupe-app \
-  -ldflags "-X media-dedupe/internal/version.Version=$(git describe --tags --exact-match | sed 's/^v//')"
-
-# 开发热重载
-wails dev
+tools/build.sh                 # 标准构建：wails build → 组装 dist → 归档
+tools/build.sh --package-only  # 只组装与归档（复用已有 go/build/bin 产物）
+tools/build.sh -v 1.2.3        # 覆盖版本号（默认取 git tag，无 tag 用 0.0.0-dev）
 ```
+
+产物：
+
+| 路径 | 内容 |
+|---|---|
+| `go/build/bin/media-dedupe.app` | wails 原生产物 |
+| `dist/media-dedupe/` | 分发目录（运行时路径契约） |
+| `dist/release/media-dedupe_{ver}_darwin_{arch}.zip` | 发布归档，解压后就是 `media-dedupe.app` |
+| `dist/release/SHA256SUMS.txt` | 校验和 |
 
 版本号规则：
 
-- `wails build` 本身不会读 Git tag 注入 Go 版本变量
-- 正式发布由 GitHub Actions 在打 `v*` tag 后构建，并通过 `-ldflags` 注入版本
-- 本地未注入时显示 `v0.0.0-dev`；需要模拟正式版时用上面的 `-ldflags` 命令
+- `tools/build.sh` 从 `go.mod` 所在的 Go 模块注入 `internal/version.Version`，同时写 `wails.json` 的 `productVersion`
+- 本地无 tag 时为 `0.0.0-dev`；要模拟正式版用 `-v`
+- 正式发布由 Actions 在打 `v*` tag 后调用同一个脚本
 
 App 入口：
-- 根目录 `main.go`（供 `wails build`）
-- `cmd/app/main.go`（同逻辑入口）
+- `go/main.go`（供 `wails build`）
+- `go/cmd/app/main.go`（同逻辑入口）
 
-前端源码位于 `frontend/src/`，使用 React + TypeScript + Tailwind CSS + shadcn/ui + Radix；构建产物输出到 `frontend/dist/`，由 `frontend` 包 embed。
+前端源码位于 `go/frontend/src/`，使用 React + TypeScript + Tailwind CSS + shadcn/ui + Radix；构建产物输出到 `go/frontend/dist/`，由 `frontend` 包 embed。
 
 ```bash
-cd frontend
+cd go/frontend
 npm ci
 npm run build
 ```
 
-浏览器预览（不连接 Wails，仅用于界面检查）：`npm run dev:mock`。
+浏览器预览（不连接 Wails，仅用于界面检查）：`npm run dev:mock`。开发热重载：`cd go && wails dev`。
 
 ### 发布构建（GitHub Actions）
 
@@ -56,10 +57,11 @@ npm run build
 
 | 平台 | 架构 | 产物 |
 |---|---|---|
-| macOS | arm64 / amd64 | `media-dedupe-app_{ver}_darwin_{arch}.zip`（`.app`） |
-| Windows | amd64 | `media-dedupe-app_{ver}_windows_amd64.zip`（单文件 exe，无安装包） |
+| macOS | arm64 / amd64 | `media-dedupe_{ver}_darwin_{arch}.zip`（内含 `.app`） |
+| Windows | amd64 | `media-dedupe_{ver}_windows_amd64.zip`（单文件 exe，无安装包） |
 
-Windows 为便携版：解压后双击 `media-dedupe-app.exe` 即可使用，不生成 NSIS 安装程序。
+Windows 为便携版：解压后双击 `media-dedupe.exe` 即可使用，不生成 NSIS 安装程序。
+归档名里的平台段是 GOOS（`darwin` / `windows`），与 `internal/updater` 的资产匹配规则同源。
 
 Release tag 须匹配 `vMAJOR.MINOR.PATCH`。
 
@@ -67,7 +69,7 @@ Release tag 须匹配 `vMAJOR.MINOR.PATCH`。
 
 ```bash
 # 默认约 3000 个，输出到 ./testdata
-go run ./scripts/generate_testdata.go
+cd go && go run ./cmd/testdata-gen
 ```
 
 ## 桌面 App 使用
@@ -179,14 +181,19 @@ CLI 默认缓存同样写在上述根目录（可用 `--cache` 覆盖）。
 
 ## 项目结构
 
+四个项目（media-dedupe / video_cut / video_library / grabber）共用同一套骨架：
+根目录只留组织性目录，语言各自一个子树。
+
 ```
-main.go               # Wails 桌面入口
-cmd/
-  app/                # App 入口（与根 main 等价）
-  media-dedupe/       # 本地调试用 CLI 入口（不随 Release 发布）
-frontend/
-  dist/               # 内嵌前端（HTML/CSS/JS + 图标）
-  frontend.go         # embed FS
+go/                   # Go 模块根 = Wails 项目根
+  main.go             # Wails 桌面入口
+  cmd/
+    app/              # App 入口（与根 main 等价）
+    media-dedupe/     # 本地调试用 CLI 入口（不随 Release 发布）
+    testdata-gen/     # 生成测试媒体
+  frontend/
+    dist/             # 内嵌前端（HTML/CSS/JS + 图标）
+    frontend.go       # embed FS
 internal/
   appapi/             # Wails 绑定面（唯一 API）
   appmain/            # 启动编排（窗口 + 本地 mediastore）
@@ -202,13 +209,15 @@ internal/
   config/ model/ version/ fsutil/
   updater/            # GitHub Release 检查/下载/应用更新
   cli/                # 本地调试 CLI 实现（不随 Release 发布）
+tools/                # 构建与打包脚本（build.sh / package.sh / *.ps1）
+dist/                 # 组装目录与归档（不提交）
+docs/                 # 设计与决策文档
 ```
 
 ## 测试
 
 ```bash
-go test ./...
-go vet ./...
+cd go && go test ./... && go vet ./...
 ```
 
 ## 设计参考
