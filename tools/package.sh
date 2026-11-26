@@ -112,7 +112,10 @@ if [[ "$HAS_PYTHON" == 1 ]]; then
     # 模板 B：顶层是唯一目录 <PRODUCT>/，标准包与整包只差 tools/ 有没有。
     zip_top "$DIST" "$PRODUCT" "$asset_std"
     assert_zip_top "$asset_std" "$PRODUCT"
-    if unzip -Z1 "$asset_std" | grep -q "^${PRODUCT}/tools/"; then
+    # 名单先落盘再判断：`unzip | grep -q` 里 grep 一命中就退出，unzip 被 SIGPIPE
+    # 顶死，pipefail 下整条管道算失败 —— 恰好会把「确实有问题」判成「没问题」。
+    names_std="$(unzip -Z1 "$asset_std")"
+    if printf '%s\n' "$names_std" | grep -q "^${PRODUCT}/tools/"; then
         die "标准包里出现了 tools/ —— 组件顺序被改乱了"
     fi
 else
@@ -170,9 +173,10 @@ if [[ "$want_full" == 1 ]]; then
         step "生成整包 $(basename "$asset_full")"
         zip_top "$DIST" "$PRODUCT" "$asset_full"
         assert_zip_top "$asset_full" "$PRODUCT"
+        names_full="$(unzip -Z1 "$asset_full")"
         for c in $COMPONENTS $BUNDLED; do
             [[ -e "$STAGE/tools/$c" ]] || continue
-            unzip -Z1 "$asset_full" | grep -q "^${PRODUCT}/tools/$c/" ||
+            printf '%s\n' "$names_full" | grep -q "^${PRODUCT}/tools/$c/" ||
                 die "整包里缺少 tools/${c}/"
         done
     fi
