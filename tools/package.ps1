@@ -87,50 +87,61 @@ function Copy-Component([string]$Name) {
     Note "组件：tools\$Name\"
 }
 
+function Assert-Archive([string]$Path, [string]$Expect) {
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+    try {
+        $names = @($zip.Entries | ForEach-Object { $_.FullName -replace '\\', '/' })
+        if ($names.Count -eq 0) { Die "$(Split-Path -Leaf $Path) 是空归档" }
+        $stray = @($names | Where-Object { -not ($_ -eq $Expect -or $_.StartsWith("$Expect/")) })
+        if ($stray.Count -gt 0) {
+            Die "$(Split-Path -Leaf $Path) 顶层应为 $Expect，实际出现：$($stray[0])"
+        }
+        Note "归档结构：$($names.Count) 个条目，全部在 $Expect 下"
+    }
+    finally { $zip.Dispose() }
+}
+
+New-Item -ItemType Directory -Path $Rel -Force | Out-Null
+$suffix = 'windows_amd64'
+
+# 顺序是刻意的，与 package.sh 一致：标准包必须在拷组件之前归档，这样
+# 「标准包不含 tools\ 」不需要额外临时目录或二次拷贝 —— 它就是拷组件之前的那棵树。
+$stdAsset = Join-Path $Rel "${Slug}_${Version}_${suffix}.zip"
+if (Test-Path $stdAsset) { Remove-Item -Force $stdAsset }
+
+Step "生成标准包 $(Split-Path -Leaf $stdAsset)"
+if ($HasPython -eq '1') {
+    # 模板 B：顶层是唯一目录 <PRODUCT>\，标准包与整包只差 tools\ 有没有。
+    Compress-Archive -Path $Stage -DestinationPath $stdAsset -Force
+    Assert-Archive $stdAsset $Product
+}
+else {
+    # 模板 A：zip 根就是可执行文件，解压即用。
+    Compress-Archive -Path (Join-Path $Stage "$Exe.exe") -DestinationPath $stdAsset -Force
+    Assert-Archive $stdAsset "$Exe.exe"
+}
+
 if ($Full) {
-    if ($HasPython -ne '1') { Note '模板 A 无组件，-Full 与标准包等价' }
-    foreach ($c in $Components) { Copy-Component $c }
-    foreach ($c in $Bundled) {
-        if (Test-Path (Get-ComponentSource $c)) { Copy-Component $c }
-        else { Note "缺少 ${c}—— 相关功能降级，其余不受影响" }
+    if ($HasPython -ne '1') {
+        Note '模板 A 无组件，-Full 与标准包等价'
+    }
+    else {
+        foreach ($c in $Components) { Copy-Component $c }
+        foreach ($c in $Bundled) {
+            if (Test-Path (Get-ComponentSource $c)) { Copy-Component $c }
+            else { Note "缺少 ${c}—— 相关功能降级，其余不受影响" }
+        }
+
+        $fullAsset = Join-Path $Rel "${Slug}_${Version}_full_${suffix}.zip"
+        if (Test-Path $fullAsset) { Remove-Item -Force $fullAsset }
+        Step "生成整包 $(Split-Path -Leaf $fullAsset)"
+        Compress-Archive -Path $Stage -DestinationPath $fullAsset -Force
+        Assert-Archive $fullAsset $Product
     }
 }
 else {
     Note '标准包：不含 tools\ 组件，首次使用时按需下载'
 }
-
-New-Item -ItemType Directory -Path $Rel -Force | Out-Null
-$suffix = 'windows_amd64'
-if ($Full -and $HasPython -eq '1') {
-    $asset = Join-Path $Rel "${Slug}_${Version}_full_${suffix}.zip"
-}
-else {
-    $asset = Join-Path $Rel "${Slug}_${Version}_${suffix}.zip"
-}
-if (Test-Path $asset) { Remove-Item -Force $asset }
-
-Step "生成归档 $(Split-Path -Leaf $asset)"
-if ($HasPython -eq '1') {
-    # 模板 B：顶层是唯一目录 <PRODUCT>\，标准包与整包只差 tools\ 有没有。
-    Compress-Archive -Path $Stage -DestinationPath $asset -Force
-    $expect = $Product
-}
-else {
-    # 模板 A：zip 根就是可执行文件，解压即用。
-    Compress-Archive -Path (Join-Path $Stage "$Exe.exe") -DestinationPath $asset -Force
-    $expect = "$Exe.exe"
-}
-
-$zip = [System.IO.Compression.ZipFile]::OpenRead($asset)
-try {
-    $names = @($zip.Entries | ForEach-Object { $_.FullName -replace '\\', '/' })
-    $stray = @($names | Where-Object { -not ($_ -eq $expect -or $_.StartsWith("$expect/")) })
-    if ($stray.Count -gt 0) {
-        Die "$(Split-Path -Leaf $asset) 顶层应为 $expect，实际出现：$($stray[0])"
-    }
-    Write-Host "    归档结构：$($names.Count) 个条目，全部在 $expect 下"
-}
-finally { $zip.Dispose() }
 
 if ($LegacyFlat) {
     if ($HasPython -ne '1') {

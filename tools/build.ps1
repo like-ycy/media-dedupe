@@ -142,7 +142,13 @@ else {
 }
 
 Step '组装与归档'
+# 用显式命名参数调用，不要 `& $pkg @arrayArgs`：数组 splatting 在 CI 的 pwsh 上
+# 会把版本号当位置参数传给 package.ps1，四个仓库的 Windows 构建都栽在这一行，
+# 报 A positional parameter cannot be found that accepts argument '0.x.y'。
 $pkg = Join-Path $Root 'tools\package.ps1'
-$pkgArgs = @('-Version', $Version)
-if ($Full) { $pkgArgs += '-Full' }
-& $pkg @pkgArgs
+if ($Full) {
+    & $pkg -Version $Version -Full
+}
+else {
+    & $pkg -Version $Version
+}
