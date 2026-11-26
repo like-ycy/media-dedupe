@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS text_facts (
     features_json TEXT,
     features_blob BLOB,
     text_hash TEXT NOT NULL DEFAULT '',
+    decode_error TEXT NOT NULL DEFAULT '',
     version INTEGER NOT NULL DEFAULT 1,
     FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
 );
@@ -114,6 +115,13 @@ CREATE TABLE IF NOT EXISTS duplicate_groups (
     group_type TEXT NOT NULL,
     confidence REAL NOT NULL,
     recommended_file_id INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS text_verifications (
+    left_hash TEXT NOT NULL,
+    right_hash TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    result_json TEXT NOT NULL,
+    PRIMARY KEY (left_hash, right_hash, version)
 );
 CREATE TABLE IF NOT EXISTS duplicate_items (
     group_id INTEGER NOT NULL,
@@ -169,25 +177,25 @@ CREATE INDEX IF NOT EXISTS idx_files_size ON files(size_bytes);
 	if err != nil {
 		return err
 	}
-	hasTextHash := false
+	textColumns := map[string]bool{}
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
 			rows.Close()
 			return err
 		}
-		if name == "text_hash" {
-			hasTextHash = true
-		}
+		textColumns[name] = true
 	}
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
 		return err
 	}
-	if !hasTextHash {
-		if _, err := c.db.Exec(`ALTER TABLE text_facts ADD COLUMN text_hash TEXT NOT NULL DEFAULT ''`); err != nil {
-			return err
+	for _, name := range []string{"text_hash", "decode_error"} {
+		if !textColumns[name] {
+			if _, err := c.db.Exec(`ALTER TABLE text_facts ADD COLUMN ` + name + ` TEXT NOT NULL DEFAULT ''`); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -532,26 +540,26 @@ func (c *Cache) LoadQuickHash(fileID, sizeBytes int64) (string, bool, error) {
 	return strings.TrimPrefix(quick.String, quickHashVersion), true, nil
 }
 
-// Version 4 uses conservative text SHA-256, rune lengths and mixed shingle hashes.
-const textFactVersion = 4
+// Version 5 preserves legacy GB18030 private-use mappings and decoding failures.
+const textFactVersion = 5
 
 func (c *Cache) SaveTextFact(fileID, sizeBytes int64, fact model.TextFingerprint) error {
 	_, err := c.db.Exec(`
-INSERT INTO text_facts (file_id, size_bytes, normalized_length, name_key, features_blob, features_json, version, text_hash)
-VALUES (?, ?, ?, '', ?, '', ?, ?)
+INSERT INTO text_facts (file_id, size_bytes, normalized_length, name_key, features_blob, features_json, version, text_hash, decode_error)
+VALUES (?, ?, ?, '', ?, '', ?, ?, ?)
 ON CONFLICT(file_id) DO UPDATE SET
  size_bytes=excluded.size_bytes, normalized_length=excluded.normalized_length,
  name_key='', features_blob=excluded.features_blob, features_json='',
- version=excluded.version, text_hash=excluded.text_hash
-`, fileID, sizeBytes, fact.Length, encodeFeatures(fact.Features), textFactVersion, fact.Digest)
+ version=excluded.version, text_hash=excluded.text_hash, decode_error=excluded.decode_error
+`, fileID, sizeBytes, fact.Length, encodeFeatures(fact.Features), textFactVersion, fact.Digest, fact.DecodeError)
 	return err
 }
 
 func (c *Cache) LoadTextFact(fileID, sizeBytes int64) (model.TextFingerprint, bool, error) {
 	var fact model.TextFingerprint
 	var blob []byte
-	err := c.db.QueryRow(`SELECT normalized_length, features_blob, text_hash
-FROM text_facts WHERE file_id = ? AND size_bytes = ? AND version = ?`, fileID, sizeBytes, textFactVersion).Scan(&fact.Length, &blob, &fact.Digest)
+	err := c.db.QueryRow(`SELECT normalized_length, features_blob, text_hash, decode_error
+FROM text_facts WHERE file_id = ? AND size_bytes = ? AND version = ?`, fileID, sizeBytes, textFactVersion).Scan(&fact.Length, &blob, &fact.Digest, &fact.DecodeError)
 	if err == sql.ErrNoRows {
 		return fact, false, nil
 	}
@@ -560,6 +568,31 @@ FROM text_facts WHERE file_id = ? AND size_bytes = ? AND version = ?`, fileID, s
 	}
 	fact.Features, err = decodeFeatures(blob)
 	return fact, err == nil, err
+}
+
+const textVerificationVersion = 1
+
+func (c *Cache) LoadTextVerification(leftHash, rightHash string) (model.TextVerification, bool, error) {
+	var result model.TextVerification
+	var data string
+	err := c.db.QueryRow(`SELECT result_json FROM text_verifications WHERE left_hash=? AND right_hash=? AND version=?`, leftHash, rightHash, textVerificationVersion).Scan(&data)
+	if err == sql.ErrNoRows {
+		return result, false, nil
+	}
+	if err != nil {
+		return result, false, err
+	}
+	err = json.Unmarshal([]byte(data), &result)
+	return result, err == nil, err
+}
+
+func (c *Cache) SaveTextVerification(leftHash, rightHash string, result model.TextVerification) error {
+	data, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	_, err = c.db.Exec(`INSERT INTO text_verifications (left_hash,right_hash,version,result_json) VALUES (?,?,?,?) ON CONFLICT(left_hash,right_hash,version) DO UPDATE SET result_json=excluded.result_json`, leftHash, rightHash, textVerificationVersion, string(data))
+	return err
 }
 
 func encodeFeatures(features []uint64) []byte {
@@ -1174,7 +1207,7 @@ func (c *Cache) LatestScanRunID() (int64, bool, error) {
 }
 
 func (c *Cache) Info() (map[string]int, error) {
-	tables := []string{"files", "file_hashes", "media_metadata", "perceptual_hashes", "text_facts", "duplicate_groups", "duplicate_items", "scan_runs", "errors"}
+	tables := []string{"files", "file_hashes", "media_metadata", "perceptual_hashes", "text_facts", "text_verifications", "duplicate_groups", "duplicate_items", "scan_runs", "errors"}
 	out := map[string]int{}
 	for _, t := range tables {
 		var n int
@@ -1187,7 +1220,7 @@ func (c *Cache) Info() (map[string]int, error) {
 }
 
 func (c *Cache) Clear() error {
-	tables := []string{"duplicate_items", "duplicate_groups", "errors", "perceptual_hashes", "text_facts", "media_metadata", "file_hashes", "scan_runs", "files"}
+	tables := []string{"duplicate_items", "duplicate_groups", "errors", "perceptual_hashes", "text_facts", "text_verifications", "media_metadata", "file_hashes", "scan_runs", "files"}
 	for _, t := range tables {
 		if _, err := c.db.Exec(`DELETE FROM ` + t); err != nil {
 			return err

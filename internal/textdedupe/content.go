@@ -9,10 +9,11 @@ import (
 	"strings"
 	"unicode/utf16"
 	"unicode/utf8"
-
-	"golang.org/x/text/encoding/simplifiedchinese"
-	"golang.org/x/text/transform"
 )
+
+type decodeError struct{ err error }
+
+func (e *decodeError) Error() string { return e.err.Error() }
 
 func readText(path string) (string, error) {
 	data, err := os.ReadFile(path)
@@ -21,7 +22,7 @@ func readText(path string) (string, error) {
 	}
 	text, err := decodeText(data)
 	if err != nil {
-		return "", err
+		return "", &decodeError{err: err}
 	}
 	return normalize(text), nil
 }
@@ -62,17 +63,7 @@ func decodeText(data []byte) (string, error) {
 	if utf8.Valid(data) {
 		return string(data), nil
 	}
-	decoded, _, err := transform.Bytes(simplifiedchinese.GB18030.NewDecoder(), data)
-	if err != nil {
-		return "", fmt.Errorf("GB18030 解码失败: %w", err)
-	}
-	// The legacy decoder can silently replace invalid input. A round trip must
-	// preserve every source byte before decoded text can establish equality.
-	encoded, _, err := transform.Bytes(simplifiedchinese.GB18030.NewEncoder(), decoded)
-	if err != nil || !bytes.Equal(encoded, data) {
-		return "", fmt.Errorf("GB18030 解码有损或包含无效字节")
-	}
-	return string(decoded), nil
+	return decodeGB18030(data)
 }
 
 // normalize deliberately changes line endings only. Case, spacing, Unicode

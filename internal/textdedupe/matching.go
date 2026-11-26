@@ -23,6 +23,10 @@ func Groups(facts []Fact, threshold float64) []model.ReportGroup {
 }
 
 func GroupsContext(ctx context.Context, facts []Fact, threshold float64) []model.ReportGroup {
+	return GroupsProgress(ctx, facts, threshold, nil)
+}
+
+func GroupsProgress(ctx context.Context, facts []Fact, threshold float64, progress ProgressFunc) []model.ReportGroup {
 	if ctx.Err() != nil {
 		return nil
 	}
@@ -48,9 +52,13 @@ func GroupsContext(ctx context.Context, facts []Fact, threshold float64) []model
 	}
 	links := map[[2]int]relation{}
 	uf := match.NewUnionFind()
-	for _, p := range candidatePairs(ctx, reps) {
+	pairs := candidatePairs(ctx, reps)
+	for index, p := range pairs {
 		if ctx.Err() != nil {
 			return nil
+		}
+		if progress != nil && index%1024 == 0 {
+			progress(index, len(pairs), "")
 		}
 		r, ok := compare(reps[p[0]], reps[p[1]], threshold)
 		if !ok {
@@ -58,6 +66,9 @@ func GroupsContext(ctx context.Context, facts []Fact, threshold float64) []model
 		}
 		links[p] = r
 		uf.Union(int64(p[0]), int64(p[1]))
+	}
+	if progress != nil && ctx.Err() == nil {
+		progress(len(pairs), len(pairs), "")
 	}
 	if ctx.Err() != nil {
 		return nil
@@ -143,6 +154,9 @@ func GroupsContext(ctx context.Context, facts []Fact, threshold float64) []model
 				if len(f.Names) > 0 {
 					reasons = append(reasons, f.Names[0].Reasons()...)
 				}
+				if f.DecodeError != "" {
+					reasons = append(reasons, "正文未参与比较，保留书名线索："+f.DecodeError)
+				}
 				reasons = append(reasons, evidence...)
 				if len(component) == 1 {
 					action = model.ActionKeep
@@ -187,8 +201,8 @@ func compare(a, b Fact, threshold float64) (relation, bool) {
 			nameScore = math.Max(nameScore, novelname.Match(an, bn))
 		}
 	}
-	left, right, common := sharedSample(a.Features, b.Features)
-	if a.Length >= 200 && b.Length >= 200 && left >= 32 && right >= 32 && min(len(a.Features), len(b.Features)) >= 64 {
+	left, right, common := sharedSample(a, b, threshold, nameScore)
+	if common >= 0 {
 		lc, rc := float64(common)/float64(left), float64(common)/float64(right)
 		dice := 2 * float64(common) / float64(left+right)
 		if dice >= threshold {
@@ -207,9 +221,13 @@ func compare(a, b Fact, threshold float64) (relation, bool) {
 	return relation{}, false
 }
 
-// Compare bottom-k sketches under a shared cutoff. Dividing the intersection
-// by each sketch's original size would hide a short text contained in a novel.
-func sharedSample(a, b []uint64) (int, int, int) {
+// Compare bottom-k sketches under a shared cutoff. A negative intersection
+// means no content relation can qualify, even if all remaining hashes match.
+func sharedSample(left, right Fact, threshold, nameScore float64) (int, int, int) {
+	a, b := left.Features, right.Features
+	if left.Length < 200 || right.Length < 200 || min(len(a), len(b)) < 64 {
+		return 0, 0, -1
+	}
 	cutoff := uint64(math.MaxUint64)
 	if len(a) == maxFeatures {
 		cutoff = min(cutoff, a[len(a)-1])
@@ -219,8 +237,26 @@ func sharedSample(a, b []uint64) (int, int, int) {
 	}
 	na := sort.Search(len(a), func(i int) bool { return a[i] > cutoff })
 	nb := sort.Search(len(b), func(i int) bool { return b[i] > cutoff })
+	if na < 32 || nb < 32 {
+		return na, nb, -1
+	}
+	// Round down intentionally: the bound may admit one extra hash, but cannot
+	// reject a match at a floating-point threshold boundary.
+	needed := int(threshold * float64(na+nb) / 2)
+	if left.Length < right.Length {
+		needed = min(needed, max(32, int(math.Max(.97, threshold)*float64(na))))
+	}
+	if right.Length < left.Length {
+		needed = min(needed, max(32, int(math.Max(.97, threshold)*float64(nb))))
+	}
+	if nameScore == 1 {
+		needed = min(needed, max(32, int(.10*float64(max(na, nb)))))
+	}
 	i, j, common := 0, 0, 0
 	for i < na && j < nb {
+		if common+min(na-i, nb-j) < needed {
+			return na, nb, -1
+		}
 		if a[i] < b[j] {
 			i++
 		} else if a[i] > b[j] {

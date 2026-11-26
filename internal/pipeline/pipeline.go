@@ -331,6 +331,32 @@ func Scan(opts Options) (*Result, error) {
 	var similarTextGroups []model.ReportGroup
 	if opts.IncludeTexts && ctx.Err() == nil {
 		emit(progress.Event{Stage: progress.StageText, Phase: "running", Message: "TXT 文本哈希、正文覆盖与书名分析...", Percent: 82, FilesSeen: len(files), ProjectID: opts.ProjectID})
+		textProgress := func(label string, start, end float64) textdedupe.ProgressFunc {
+			var last time.Time
+			return func(done, total int, path string) {
+				if done != total && !last.IsZero() && time.Since(last) < 100*time.Millisecond {
+					return
+				}
+				last = time.Now()
+				fraction := 1.0
+				if total > 0 {
+					fraction = float64(done) / float64(total)
+				}
+				emit(progress.Event{Stage: progress.StageText, Phase: "running", Message: fmt.Sprintf("%s %d/%d", label, done, total), Current: done, Total: total, CurrentFile: path, Percent: start + (end-start)*fraction, FilesSeen: len(files), ProjectID: opts.ProjectID})
+			}
+		}
+		recordTextErrors := func(errs []textdedupe.FileError) {
+			for _, textErr := range errs {
+				switch textErr.Stage {
+				case "text_cache":
+					hooks.fatal(textErr.Path, textErr.Stage, textErr.Err)
+				case "text_decode":
+					recordErr(textErr.Path, textErr.Stage, model.ErrorText, textErr.Err.Error())
+				default:
+					hooks.file(textErr.Path, textErr.Stage, textErr.Err)
+				}
+			}
+		}
 		textFiles := make([]model.DiscoveredFile, 0)
 		textIDs := make([]int64, 0)
 		textUnchanged := make([]bool, 0)
@@ -345,16 +371,8 @@ func Scan(opts Options) (*Result, error) {
 			textIDs = append(textIDs, infos[i].fileID)
 			textUnchanged = append(textUnchanged, infos[i].unchanged)
 		}
-		facts, textErrs := textdedupe.FactsCachedContext(ctx, textFiles, textIDs, textUnchanged, opts.TextWorkers, c)
-		for _, textErr := range textErrs {
-			// Cache read/write problems are program-level; read failures are
-			// ordinary bad files and keep their errno for classification.
-			if textErr.Stage == "text_cache" {
-				hooks.fatal(textErr.Path, textErr.Stage, textErr.Err)
-				continue
-			}
-			hooks.file(textErr.Path, textErr.Stage, textErr.Err)
-		}
+		facts, textErrs := textdedupe.FactsCachedProgress(ctx, textFiles, textIDs, textUnchanged, opts.TextWorkers, c, textProgress("TXT 解码与指纹", 82, 83))
+		recordTextErrors(textErrs)
 		// Byte-equal siblings may carry the useful title even if the representative
 		// was renamed. Use all their names without re-reading duplicate content.
 		for i := range facts {
@@ -366,7 +384,8 @@ func Scan(opts Options) (*Result, error) {
 				}
 			}
 		}
-		similarTextGroups = textdedupe.GroupsContext(ctx, facts, opts.TextThreshold)
+		similarTextGroups = textdedupe.GroupsProgress(ctx, facts, opts.TextThreshold, textProgress("TXT 候选比较", 83, 83.5))
+		recordTextErrors(textdedupe.VerifyGroups(ctx, similarTextGroups, facts, c, textProgress("TXT 全文覆盖复核", 83.5, 84)))
 
 		similarCount += len(similarTextGroups)
 		emit(progress.Event{Stage: progress.StageText, Phase: "done", Message: fmt.Sprintf("TXT 文本与书名关联 %d 组", len(similarTextGroups)), Percent: 84, FilesSeen: len(files), FoundSimilar: similarCount, ProjectID: opts.ProjectID})

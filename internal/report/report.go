@@ -108,7 +108,7 @@ func RenderJSON(groups []model.ReportGroup, errs []model.ReportError, meta model
 
 func RenderText(groups []model.ReportGroup, errs []model.ReportError, meta model.ScanMeta) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Scanned %d files (%d failed), %d duplicate groups, threshold=%.2f\n",
+	fmt.Fprintf(&b, "Scanned %d files (%d warnings/errors), %d duplicate groups, threshold=%.2f\n",
 		meta.FilesSeen, meta.FilesFailed, len(groups), meta.Threshold)
 	var cleanupBytes int64
 	for _, g := range groups {
@@ -138,7 +138,7 @@ func RenderText(groups []model.ReportGroup, errs []model.ReportError, meta model
 		fmt.Fprintf(&b, "\nCleanup candidate total size: %s\n", humanBytes(cleanupBytes))
 	}
 	if len(errs) > 0 {
-		b.WriteString("\nErrors:\n")
+		b.WriteString("\nWarnings/errors:\n")
 		for _, e := range errs {
 			fmt.Fprintf(&b, "  %s [%s] %s\n", e.Path, e.Stage, e.Message)
 		}
@@ -202,7 +202,7 @@ h1 { font-size:22px; margin:0 0 8px; }
 <h1>文件去重助手报告</h1>
 <div class="summary">
   扫描 <strong>` + fmt.Sprint(meta.FilesSeen) + `</strong> 个文件，
-  失败 <strong>` + fmt.Sprint(meta.FilesFailed) + `</strong>，
+  警告或错误 <strong>` + fmt.Sprint(meta.FilesFailed) + `</strong>，
   重复组 <strong>` + fmt.Sprint(len(groups)) + `</strong>，
   建议清理 <strong>` + fmt.Sprint(cleanupCount) + `</strong> 个（约 ` + humanBytes(cleanupBytes) + `），
   阈值 <strong>` + fmt.Sprintf("%.2f", meta.Threshold) + `</strong>
@@ -236,7 +236,7 @@ h1 { font-size:22px; margin:0 0 8px; }
 	}
 
 	if len(errs) > 0 {
-		b.WriteString(`<section class="group errors"><h2>Errors</h2><table><tr><th>Path</th><th>Stage</th><th>Message</th></tr>`)
+		b.WriteString(`<section class="group errors"><h2>警告与错误</h2><table><tr><th>Path</th><th>Stage</th><th>Message</th></tr>`)
 		for _, e := range errs {
 			fmt.Fprintf(&b, `<tr><td>%s</td><td>%s</td><td>%s</td></tr>`,
 				html.EscapeString(e.Path), html.EscapeString(e.Stage), html.EscapeString(e.Message))

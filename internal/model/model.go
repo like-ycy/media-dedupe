@@ -57,9 +57,21 @@ func (t GroupType) Label() string {
 // TextFingerprint uses a conservative text hash for equality and a separate
 // bounded shingle sample for approximate comparisons. Length counts runes.
 type TextFingerprint struct {
-	Digest   string
-	Length   int
-	Features []uint64
+	Digest      string
+	Length      int
+	Features    []uint64
+	DecodeError string
+}
+
+// TextVerification describes a continuous full-text inclusion. Hash ordering
+// determines left/right; paths are rendered separately so renames stay valid.
+type TextVerification struct {
+	Matched           bool
+	ShorterIsLeft     bool
+	WhitespaceIgnored bool
+	StartChar         int
+	CharacterCount    int
+	ExtraCharacters   int
 }
 
 type Action string
@@ -149,11 +161,12 @@ type ReportError struct {
 	Message string
 }
 
-// Scan error kinds. Skipped files never enter the cache or the comparison;
-// auxiliary warnings only affected generated previews.
+// Skipped files do not participate. Text decoding warnings preserve filename
+// evidence and raw hashes; auxiliary warnings affect optional media analysis.
 const (
 	ErrorSkipped = "skipped"
 	ErrorAux     = "aux"
+	ErrorText    = "text_decode"
 	ErrorFatal   = "fatal"
 )
 
