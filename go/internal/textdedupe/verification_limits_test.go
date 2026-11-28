@@ -3,6 +3,7 @@ package textdedupe
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,7 +23,7 @@ func TestVerifyGroupsBoundsPairsPerGroup(t *testing.T) {
 	var items []model.ReportItem
 	for i := 0; i < members; i++ {
 		content := body(int64(100+i), 400)
-		path := filepath.Join(dir, "edition.txt"+string(rune('a'+i)))
+		path := filepath.Join(dir, fmt.Sprintf("edition-%02d.txt", i))
 		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -71,7 +72,7 @@ func TestVerifyGroupsSurvivesCacheFailure(t *testing.T) {
 	var facts []Fact
 	var items []model.ReportItem
 	for i, content := range []string{short, long} {
-		path := filepath.Join(dir, "pair"+string(rune('a'+i))+".txt")
+		path := filepath.Join(dir, fmt.Sprintf("pair-%02d.txt", i))
 		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -115,7 +116,7 @@ func TestGroupEvidenceIsBounded(t *testing.T) {
 			variant[i*7+k] = '甲'
 		}
 		content := string(variant)
-		path := filepath.Join(dir, "book"+string(rune('a'+i))+".txt")
+		path := filepath.Join(dir, fmt.Sprintf("book-%02d.txt", i))
 		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
