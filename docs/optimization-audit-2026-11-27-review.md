@@ -176,3 +176,19 @@
 4. **可释放空间不含推荐保留文件**：表头、列表、清理候选三处口径统一。
 
 **没有做的一项**：跨页「全选全部匹配」。它需要新增「按筛选条件删除」的接口（服务端自行展开候选、二次确认、失败逐条回报），风险面比现在这套「只删已加载且被勾选的行」大得多；当前分页已保证 501 组以后可达，先用「加载更多 + 全选本页」覆盖日常场景。
+
+## 发版验证（v0.9.1）
+
+第 1 步给 CI 加的三条改动，直到真正打 tag 才第一次被执行，也才暴露出三个问题，均已修复并再次发布成功：
+
+| 现象 | 原因 | 修复 |
+|---|---|---|
+| `pattern all:dist: no matching files found`，所有包 setup failed | `frontend/frontend.go` 用 `//go:embed all:dist` 内嵌前端产物，而 `dist/` 不入库；`go test ./...` 在构建之前跑，全新 checkout 没有这个目录 | 测试步骤先生成一个 `frontend/dist/.keep` 占位文件（测试不读这份资源），真正的产物仍由后续构建生成 |
+| Windows 任务报 `The term ':' is not recognized` | Windows runner 默认 shell 是 PowerShell，占位文件用了 POSIX 写法 | 该步骤显式 `shell: bash` |
+| Windows 上 `TestVerifyGroupsBoundsPairsPerGroup` 报非法文件名 | 文件名用 `rune('a'+i)` 拼，第 30 个成员拼出 `\|` | 改用序号命名 |
+
+顺带修掉两处一直存在、但从来没在 Windows 上跑过的平台假设：`TestIsFatalIOError` 用 POSIX errno 断言「会中断扫描」（Windows 的判定依据是 winerror.h 的码），删除部分失败用例靠去掉目录写权限制造失败（Windows 上不影响删除）。现在按平台注入故障、errno 与 Win32 码各自单独覆盖，chmod 用例在 Windows 上跳过。
+
+最终 `v0.9.1` 三个平台任务全部通过，发布产物：`media-dedupe_0.9.1_{darwin_amd64,darwin_arm64,windows_amd64}.zip` + `SHA256SUMS.txt`。本地 `tools/build.sh -v 0.9.1` 也完整走通（wails build → 组装 → 归档 → 校验和）。
+
+注：`v0.9.1` 这个 tag 在失败期间被重建过三次（前两次运行未产生 release），仓库里只保留最终指向 `cbc2d5e` 的那一个。
