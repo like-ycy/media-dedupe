@@ -60,6 +60,14 @@ jobs:
         with:
           go-version-file: go/go.mod
           cache: true
+          # go.sum 在 go/ 下。不显式指定时 setup-go 只在仓库根找 go.sum，
+          # 找不到就抛错、被它自己 catch 成一条 warning —— 表现为发版仍然能过，
+          # 但模块缓存永远不命中，每次重新下载全部依赖。
+          cache-dependency-path: go/go.sum
+
+      - name: Test (Go)
+        working-directory: go
+        run: go test ./...
 
       - name: Setup Node
         uses: actions/setup-node@v7
@@ -69,7 +77,10 @@ jobs:
       - name: Install Wails CLI
         shell: bash
         run: |
-          go install github.com/wailsapp/wails/v2/cmd/wails@latest
+          # CLI 版本固定到 go.mod 里那一版：用 @latest 时，CLI 与库的漂移只会
+          # 在发版当天以「本地能编、这里编不出」的形式暴露。
+          version="$(cd go && go list -m -f '{{.Version}}' github.com/wailsapp/wails/v2)"
+          go install "github.com/wailsapp/wails/v2/cmd/wails@${version}"
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Build (macOS)
