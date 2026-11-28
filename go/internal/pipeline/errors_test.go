@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"syscall"
 	"testing"
 
 	"media-dedupe/internal/model"
@@ -21,10 +20,9 @@ func TestIsFatalIOError(t *testing.T) {
 		{"missing file", fs.ErrNotExist, false},
 		{"permission", fs.ErrPermission, false},
 		{"corrupt media", errors.New("decode image config: invalid JPEG"), false},
-		{"disk io", syscall.EIO, true},
-		{"wrapped disk io", fmt.Errorf("hash /x.mp4: %w", syscall.EIO), true},
-		{"no space", syscall.ENOSPC, true},
-		{"too many files", syscall.EMFILE, true},
+		// Per-platform codes are covered by errors_unix_test.go / errors_windows_test.go.
+		{"storage failure", storageFailure(), true},
+		{"wrapped storage failure", fmt.Errorf("hash /x.mp4: %w", storageFailure()), true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -261,7 +259,7 @@ func TestRecordTextFailureClassifiesCacheErrors(t *testing.T) {
 		t.Fatalf("cache failure should be a warning, got %+v", locked)
 	}
 
-	disk, fatal := run(syscall.EIO)
+	disk, fatal := run(storageFailure())
 	if fatal == nil {
 		t.Fatal("disk failure did not abort the scan")
 	}

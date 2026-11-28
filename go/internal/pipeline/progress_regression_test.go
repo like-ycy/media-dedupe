@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 
 	"media-dedupe/internal/cache"
@@ -99,7 +98,7 @@ func TestScanProgressFatalRemainsTerminal(t *testing.T) {
 		count++
 		state.recordError(path, kind, message, count)
 	}}
-	hooks.file("disk.jpg", "image_metadata", syscall.EIO)
+	hooks.file("disk.jpg", "image_metadata", storageFailure())
 	state.emit(progress.Event{Stage: progress.StageImage, Phase: "done", Percent: 60})
 	hooks.file("bad.jpg", "image_metadata", fmt.Errorf("corrupt JPEG"))
 	state.emit(progress.Event{Stage: progress.StageDone, Phase: "done", Percent: 100})

@@ -67,7 +67,14 @@ jobs:
 
       - name: Test (Go)
         working-directory: go
-        run: go test ./...
+        run: |
+          # frontend/frontend.go 用 //go:embed all:dist 内嵌前端产物，而 dist/
+          # 是构建产物、不入库：全新 checkout 下，任何涉及 main 或 appmain 的
+          # 编译都会报 "pattern all:dist: no matching files found"。测试不读这份
+          # 资源，放一个占位文件让包编译即可，真正的产物由后面的构建步骤生成。
+          mkdir -p frontend/dist
+          : > frontend/dist/.keep
+          go test ./...
 
       - name: Setup Node
         uses: actions/setup-node@v7

@@ -3,6 +3,7 @@ package appapi
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -312,6 +313,11 @@ func TestDeleteRejectsTouchedCandidate(t *testing.T) {
 // otherwise the failed file leaves the pending list together with its group and
 // can never be retried.
 func TestDeletePartialFailureKeepsGroupPending(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The fixture makes a delete fail by removing write access from the parent
+		// directory; Windows ignores that and lets the file go.
+		t.Skip("read-only directories do not block deletion on Windows")
+	}
 	root := t.TempDir()
 	dirOK := filepath.Join(root, "ok")
 	dirLocked := filepath.Join(root, "locked")
