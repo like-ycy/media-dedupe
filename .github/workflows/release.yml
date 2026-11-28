@@ -67,6 +67,9 @@ jobs:
 
       - name: Test (Go)
         working-directory: go
+        # Windows runner 默认 shell 是 PowerShell，占位文件那两行是 POSIX 写法；
+        # 统一用 bash（runner 自带 Git bash），与下面 Install Wails CLI 一致。
+        shell: bash
         run: |
           # frontend/frontend.go 用 //go:embed all:dist 内嵌前端产物，而 dist/
           # 是构建产物、不入库：全新 checkout 下，任何涉及 main 或 appmain 的
