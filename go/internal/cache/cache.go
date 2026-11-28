@@ -39,18 +39,59 @@ func Open(path string) (*Cache, error) {
 	return c, nil
 }
 
+// A read-mostly handle lets SQLite keep its WAL until the automatic checkpoint
+// (about 1000 pages) fills it, which leaves a few MB of -wal on disk after a
+// single big scan. Folding only a WAL that has actually grown keeps the file
+// honest without making every request take the TRUNCATE lock.
+const walTruncateThreshold = 8 << 20
+
 func (c *Cache) Close() error {
 	if c == nil || c.db == nil {
 		return nil
 	}
-	// Fold WAL back into the main db so the on-disk size stays honest.
-	_, _ = c.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	if c.walBytes() > walTruncateThreshold {
+		// Best effort: a reader holding the file only costs the leftover WAL, not
+		// the correctness of the close.
+		_, _ = c.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	}
 	return c.db.Close()
+}
+
+func (c *Cache) walBytes() int64 {
+	info, err := os.Stat(c.dsn + "-wal")
+	if err != nil {
+		return 0
+	}
+	return info.Size()
+}
+
+// Checkpoint folds the WAL back into the main database so the on-disk size stays
+// honest. It is deliberately not part of Close: every API request opens and
+// closes a handle, and a read-only request has no reason to take the lock a
+// TRUNCATE checkpoint needs while a scan is writing.
+func (c *Cache) Checkpoint() error {
+	if c == nil || c.db == nil {
+		return nil
+	}
+	_, err := c.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	return err
 }
 
 func (c *Cache) DB() *sql.DB { return c.db }
 
+// schemaVersion guards init(). Bump it whenever the statements below change in a
+// way that has to run on existing caches. A matching version means opening the
+// cache — which every API request does — performs no migration work at all.
+const schemaVersion = 3
+
 func (c *Cache) init() error {
+	var version int
+	if err := c.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
+	if version >= schemaVersion {
+		return nil
+	}
 	_, err := c.db.Exec(`
 CREATE TABLE IF NOT EXISTS files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -156,6 +197,7 @@ CREATE TABLE IF NOT EXISTS errors (
 CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
 CREATE INDEX IF NOT EXISTS idx_ph_file_type ON perceptual_hashes(file_id, hash_type);
 CREATE INDEX IF NOT EXISTS idx_files_size ON files(size_bytes);
+CREATE INDEX IF NOT EXISTS idx_items_group ON duplicate_items(group_id);
 `)
 	if err != nil {
 		return err
@@ -222,6 +264,9 @@ CREATE TABLE IF NOT EXISTS frame_previews (
     path TEXT NOT NULL,
     PRIMARY KEY (file_id, frame_index)
 )`)
+	if _, err := c.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -441,6 +486,31 @@ ON CONFLICT(path) DO UPDATE SET
 		return 0, err
 	}
 	return id, tx.Commit()
+}
+
+// FileSnapshot is what the scan recorded about one path. Deleting compares it
+// before touching the disk: a file whose size or timestamp differs is no longer
+// the file the user saw in the results list, so the evidence behind "this is a
+// duplicate" no longer applies to it.
+type FileSnapshot struct {
+	SizeBytes int64
+	MTimeNs   int64
+	Inode     int64
+	Device    int64
+}
+
+func (c *Cache) LoadFileSnapshot(fileID int64) (FileSnapshot, bool, error) {
+	var s FileSnapshot
+	err := c.db.QueryRow(`
+SELECT size_bytes, mtime_ns, inode, device FROM files WHERE id = ?`, fileID,
+	).Scan(&s.SizeBytes, &s.MTimeNs, &s.Inode, &s.Device)
+	if err == sql.ErrNoRows {
+		return s, false, nil
+	}
+	if err != nil {
+		return s, false, err
+	}
+	return s, true, nil
 }
 
 // IsUnchanged trusts size+mtime when status is active.
@@ -1109,49 +1179,10 @@ FROM duplicate_groups ORDER BY id
 	}
 
 	for _, k := range keys {
-		itemRows, err := c.db.Query(`
-SELECT duplicate_items.file_id, files.path, duplicate_items.action,
-       duplicate_items.similarity, duplicate_items.quality_score, duplicate_items.reasons_json,
-       COALESCE(duplicate_items.size_bytes, files.size_bytes, 0),
-       COALESCE(duplicate_items.thumb_path, '')
-FROM duplicate_items
-JOIN files ON files.id = duplicate_items.file_id
-WHERE duplicate_items.group_id = ?
-ORDER BY duplicate_items.file_id
-`, k.id)
+		items, err := c.loadGroupItems(k.id)
 		if err != nil {
 			return nil, err
 		}
-		var items []model.ReportItem
-		for itemRows.Next() {
-			var (
-				fileID      int64
-				path        string
-				action      string
-				similarity  float64
-				quality     float64
-				reasonsJSON string
-				sizeBytes   int64
-				thumbPath   sql.NullString
-			)
-			if err := itemRows.Scan(&fileID, &path, &action, &similarity, &quality, &reasonsJSON, &sizeBytes, &thumbPath); err != nil {
-				itemRows.Close()
-				return nil, err
-			}
-			var reasons []string
-			_ = json.Unmarshal([]byte(reasonsJSON), &reasons)
-			items = append(items, model.ReportItem{
-				FileID:       fileID,
-				Path:         path,
-				Action:       model.Action(action),
-				Similarity:   similarity,
-				QualityScore: quality,
-				SizeBytes:    sizeBytes,
-				ThumbPath:    thumbPath.String,
-				Reasons:      reasons,
-			})
-		}
-		itemRows.Close()
 		st := statusBy[k.id]
 		if st.status == "" {
 			st.status = string(model.GroupPending)
@@ -1168,6 +1199,233 @@ ORDER BY duplicate_items.file_id
 		})
 	}
 	return groups, nil
+}
+
+// loadGroupItems reads one group's members. Everything a caller needs to render
+// or act on a single group lives here, so detail and report paths do not have to
+// load the whole database to reach one row.
+func (c *Cache) loadGroupItems(groupID int64) ([]model.ReportItem, error) {
+	rows, err := c.db.Query(`
+SELECT duplicate_items.file_id, files.path, duplicate_items.action,
+       duplicate_items.similarity, duplicate_items.quality_score, duplicate_items.reasons_json,
+       COALESCE(duplicate_items.size_bytes, files.size_bytes, 0),
+       COALESCE(duplicate_items.thumb_path, '')
+FROM duplicate_items
+JOIN files ON files.id = duplicate_items.file_id
+WHERE duplicate_items.group_id = ?
+ORDER BY duplicate_items.file_id
+`, groupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []model.ReportItem
+	for rows.Next() {
+		var (
+			fileID      int64
+			path        string
+			action      string
+			similarity  float64
+			quality     float64
+			reasonsJSON string
+			sizeBytes   int64
+			thumbPath   sql.NullString
+		)
+		if err := rows.Scan(&fileID, &path, &action, &similarity, &quality, &reasonsJSON, &sizeBytes, &thumbPath); err != nil {
+			return nil, err
+		}
+		var reasons []string
+		_ = json.Unmarshal([]byte(reasonsJSON), &reasons)
+		items = append(items, model.ReportItem{
+			FileID:       fileID,
+			Path:         path,
+			Action:       model.Action(action),
+			Similarity:   similarity,
+			QualityScore: quality,
+			SizeBytes:    sizeBytes,
+			ThumbPath:    thumbPath.String,
+			Reasons:      reasons,
+		})
+	}
+	return items, rows.Err()
+}
+
+// LoadGroup reads one group with its members: two queries regardless of how many
+// groups the project holds.
+func (c *Cache) LoadGroup(groupID int64) (model.ReportGroup, bool, error) {
+	var (
+		group       model.ReportGroup
+		groupType   string
+		status      string
+		ignoredAt   string
+		processedAt string
+	)
+	err := c.db.QueryRow(`
+SELECT group_type, confidence, recommended_file_id, COALESCE(status, 'pending'),
+       COALESCE(ignored_at, ''), COALESCE(processed_at, '')
+FROM duplicate_groups WHERE id = ?`, groupID,
+	).Scan(&groupType, &group.Confidence, &group.RecommendedFileID, &status, &ignoredAt, &processedAt)
+	if err == sql.ErrNoRows {
+		return group, false, nil
+	}
+	if err != nil {
+		return group, false, err
+	}
+	items, err := c.loadGroupItems(groupID)
+	if err != nil {
+		return group, false, err
+	}
+	group.GroupID = groupID
+	group.GroupType = model.GroupType(groupType)
+	group.Status = model.GroupStatus(status)
+	group.IgnoredAt = ignoredAt
+	group.ProcessedAt = processedAt
+	group.Items = items
+	return group, true, nil
+}
+
+// GroupTotals is the project header: how many groups exist, how many still need
+// attention and how much space they would free. It is one query instead of a
+// full report rebuild.
+type GroupTotals struct {
+	Groups           int
+	ExactGroups      int
+	SimilarGroups    int
+	PendingGroups    int
+	ReclaimableBytes int64
+}
+
+func (c *Cache) LoadGroupTotals() (GroupTotals, error) {
+	var totals GroupTotals
+	err := c.db.QueryRow(`
+SELECT COUNT(*),
+       COALESCE(SUM(CASE WHEN g.group_type = 'exact' THEN 1 ELSE 0 END), 0),
+       COALESCE(SUM(CASE WHEN g.group_type IN
+           ('similar_image','similar_video','similar_text','text_equal','text_contained','text_name')
+         THEN 1 ELSE 0 END), 0),
+       COALESCE(SUM(CASE WHEN COALESCE(g.status, 'pending') = 'pending' THEN 1 ELSE 0 END), 0),
+       COALESCE((
+           SELECT SUM(COALESCE(i.size_bytes, f.size_bytes, 0))
+           FROM duplicate_items i
+           JOIN duplicate_groups pg ON pg.id = i.group_id
+           LEFT JOIN files f ON f.id = i.file_id
+           WHERE i.action = 'cleanup_candidate'
+             AND i.file_id != pg.recommended_file_id
+             AND COALESCE(pg.status, 'pending') = 'pending'
+       ), 0)
+FROM duplicate_groups g`).Scan(&totals.Groups, &totals.ExactGroups, &totals.SimilarGroups, &totals.PendingGroups, &totals.ReclaimableBytes)
+	return totals, err
+}
+
+// GroupQuery narrows a group listing. Ordering is decided here, on the whole
+// result set, because sorting the page that happens to be loaded would put the
+// largest reclaimable group on page 1 only by luck.
+type GroupQuery struct {
+	Status    string
+	GroupType string
+	Search    string
+	Sort      string
+	Limit     int
+	Offset    int
+}
+
+// GroupSummary is one row of the results table: counts and byte totals only, no
+// member paths and no reasons JSON.
+type GroupSummary struct {
+	GroupID           int64
+	GroupType         string
+	Confidence        float64
+	RecommendedFileID int64
+	Status            string
+	MemberCount       int
+	CleanupCount      int
+	ReclaimableBytes  int64
+	Images            int
+	Videos            int
+	Texts             int
+}
+
+func (q GroupQuery) orderBy() string {
+	switch q.Sort {
+	case "size":
+		return "reclaim DESC, g.id ASC"
+	case "members":
+		return "members DESC, g.id ASC"
+	case "id":
+		return "g.id ASC"
+	default:
+		return "g.confidence DESC, g.id ASC"
+	}
+}
+
+// where is shared by the page query and the count so that "total" always means
+// "rows matching this filter", never "rows loaded so far".
+func (q GroupQuery) where() (string, []any) {
+	status := q.Status
+	if status == "" {
+		status = string(model.GroupPending)
+	}
+	return `(? = 'all' OR COALESCE(g.status, 'pending') = ?)
+  AND (? = '' OR g.group_type = ?)
+  AND (? = '' OR EXISTS (
+        SELECT 1 FROM duplicate_items si JOIN files sf ON sf.id = si.file_id
+        WHERE si.group_id = g.id AND instr(lower(sf.path), lower(?)) > 0))`,
+		[]any{status, status, q.GroupType, q.GroupType, q.Search, q.Search}
+}
+
+// CountGroupSummaries is the second half of a page: without it the UI cannot
+// tell "this is everything" from "there are more pages".
+func (c *Cache) CountGroupSummaries(q GroupQuery) (int, error) {
+	where, args := q.where()
+	var n int
+	err := c.db.QueryRow(`SELECT COUNT(*) FROM duplicate_groups g WHERE `+where, args...).Scan(&n)
+	return n, err
+}
+
+// LoadGroupSummaries lists the results table for one page. Filtering, ordering
+// and paging all happen in SQL, so the cost is bounded by the page size plus the
+// index work, not by how many groups the project has.
+func (c *Cache) LoadGroupSummaries(q GroupQuery) ([]GroupSummary, error) {
+	limit := q.Limit
+	if limit <= 0 {
+		limit = -1 // SQLite: negative limit means "no limit"
+	}
+	offset := q.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	where, args := q.where()
+	rows, err := c.db.Query(`
+SELECT g.id, g.group_type, g.confidence, g.recommended_file_id, COALESCE(g.status, 'pending'),
+       COUNT(i.file_id) AS members,
+       SUM(CASE WHEN i.action = 'cleanup_candidate' AND i.file_id != g.recommended_file_id THEN 1 ELSE 0 END),
+       SUM(CASE WHEN i.action = 'cleanup_candidate' AND i.file_id != g.recommended_file_id
+                THEN COALESCE(i.size_bytes, f.size_bytes, 0) ELSE 0 END) AS reclaim,
+       SUM(CASE WHEN f.media_type = 'image' THEN 1 ELSE 0 END),
+       SUM(CASE WHEN f.media_type = 'video' THEN 1 ELSE 0 END),
+       SUM(CASE WHEN f.media_type = 'text' THEN 1 ELSE 0 END)
+FROM duplicate_groups g
+JOIN duplicate_items i ON i.group_id = g.id
+JOIN files f ON f.id = i.file_id
+WHERE `+where+`
+GROUP BY g.id
+ORDER BY `+q.orderBy()+`
+LIMIT ? OFFSET ?`,
+		append(args, limit, offset)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []GroupSummary
+	for rows.Next() {
+		var row GroupSummary
+		if err := rows.Scan(&row.GroupID, &row.GroupType, &row.Confidence, &row.RecommendedFileID, &row.Status,
+			&row.MemberCount, &row.CleanupCount, &row.ReclaimableBytes, &row.Images, &row.Videos, &row.Texts); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
 }
 
 func (c *Cache) LoadErrors(scanRunID *int64) ([]model.ReportError, error) {

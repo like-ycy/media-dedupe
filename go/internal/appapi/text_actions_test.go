@@ -1,6 +1,7 @@
 package appapi
 
 import (
+	"media-dedupe/internal/fsutil"
 	"media-dedupe/internal/mediastore"
 	"media-dedupe/internal/model"
 	"media-dedupe/internal/project"
@@ -35,7 +36,15 @@ func TestTextBulkDeleteOnlyConfirmedCopies(t *testing.T) {
 		if err := os.WriteFile(path, []byte("test"), 0600); err != nil {
 			t.Fatal(err)
 		}
-		id, err := c.UpsertFile(model.DiscoveredFile{Path: path, MediaType: model.MediaText, SizeBytes: 4})
+		// Store what a scan would have recorded: delete re-checks size and
+		// timestamp against this row before touching the file.
+		size, mtimeNs, inode, device, err := fsutil.SafeStat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, err := c.UpsertFile(model.DiscoveredFile{
+			Path: path, MediaType: model.MediaText, SizeBytes: size, MTimeNs: mtimeNs, Inode: inode, Device: device,
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -43,7 +52,7 @@ func TestTextBulkDeleteOnlyConfirmedCopies(t *testing.T) {
 		if i == 2 {
 			action = model.ActionCleanup
 		}
-		items = append(items, model.ReportItem{FileID: id, Path: path, Action: action, SizeBytes: 4})
+		items = append(items, model.ReportItem{FileID: id, Path: path, Action: action, SizeBytes: size})
 	}
 	if err := c.ReplaceReportGroups([]model.ReportGroup{{GroupID: 1, GroupType: model.GroupTextName, RecommendedFileID: items[0].FileID, Items: items}}, 0); err != nil {
 		t.Fatal(err)
@@ -57,8 +66,8 @@ func TestTextBulkDeleteOnlyConfirmedCopies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gs[0].ReclaimableBytes != 4 || gs[0].CleanupCount != 1 {
-		t.Fatalf("incorrect reclaimable bytes %+v", gs[0])
+	if gs.Items[0].ReclaimableBytes != 4 || gs.Items[0].CleanupCount != 1 {
+		t.Fatalf("incorrect reclaimable bytes %+v", gs.Items[0])
 	}
 	if err := os.Remove(items[1].Path); err != nil {
 		t.Fatal(err)

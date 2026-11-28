@@ -9,19 +9,21 @@ export interface PathStatus { path: string; exists: boolean; isDir: boolean; err
 export interface ScanEvent { stage: string; phase: string; message: string; percent: number; currentFile: string; foundExact: number; foundSimilar: number; filesSeen: number; errors: number; projectId: string }
 export interface ScanStatus { projectId: string; running: boolean; canceled: boolean; lastError?: string; startedAt?: string; finishedAt?: string; event?: ScanEvent; percent: number; filesSeen: number; errors: number }
 export interface ScanError { path: string; stage: string; kind?: string; message: string }
-export interface Group { groupId: number; groupType: string; confidence: number; recommendedFileId: number; status: string; memberCount: number; cleanupCount: number; reclaimableBytes: number; coverThumbUrl: string; typeLabel: string; mediaKind: string }
+export interface GroupPage { items: Group[]; total: number; limit: number; offset: number; hasMore: boolean }
+export interface Group { groupId: number; groupType: string; confidence: number; recommendedFileId: number; status: string; memberCount: number; cleanupCount: number; reclaimableBytes: number; typeLabel: string; mediaKind: string }
 export interface Item { fileId: number; path: string; action: string; similarity: number; hammingDistance?: number; qualityScore: number; sizeBytes: number; thumbUrl: string; width: number; height: number; durationMs: number; mediaType: string; mediaHashHex: string; isRecommended: boolean; exists: boolean; reasons: string[] }
 export interface GroupDetail { groupId: number; groupType: string; typeLabel: string; confidence: number; recommendedFileId: number; status: string; reclaimableBytes: number; items: Item[] }
 export interface UpdateInfo { hasUpdate: boolean; currentVersion: string; latestVersion: string; releaseName?: string; releaseNotes?: string; releaseUrl?: string; downloadUrl?: string; assetName?: string; assetSize?: number; checksumsUrl?: string }
 export interface DownloadProgress { downloaded: number; total: number; percent: number; speed: number }
-export interface DeleteResult { succeeded: string[]; failed: { path: string; message: string }[]; mode: string; markedProcessed: number[] }
+export interface DeleteFailure { path: string; message: string; fileId: number; groupId: number }
+export interface DeleteResult { succeeded: string[]; failed: DeleteFailure[]; mode: string; markedProcessed: number[]; metadataErrors?: string[] }
 
 export interface AppAPI {
   AppReady(): Promise<AppInfo>; GetSystemAppearance(): Promise<string>; ListProjects(): Promise<Project[]>; GetProject(id: string): Promise<Project>
   CreateProject(input: Record<string, unknown>): Promise<Project>; UpdateProject(id: string, patch: Record<string, unknown>): Promise<Project>; DeleteProject(id: string): Promise<void>
   ListRecentDirs(): Promise<string[]>; SelectDirectory(): Promise<string>; CheckPaths(paths: string[]): Promise<PathStatus[]>
   GetSettings(): Promise<Settings>; SaveSettings(settings: Settings): Promise<void>; StartScan(id: string): Promise<void>; CancelScan(id: string): Promise<void>; GetScanStatus(id: string): Promise<ScanStatus>; ListScanErrors(id: string): Promise<ScanError[]>
-  ListGroups(id: string, filter: Record<string, unknown>): Promise<Group[]>; GetGroup(id: string, groupId: number): Promise<GroupDetail>; SetGroupStatus(id: string, groupId: number, status: string): Promise<void>; SetRecommended(id: string, groupId: number, fileId: number): Promise<void>
+  ListGroups(id: string, filter: Record<string, unknown>): Promise<GroupPage>; GetGroup(id: string, groupId: number): Promise<GroupDetail>; SetGroupStatus(id: string, groupId: number, status: string): Promise<void>; SetRecommended(id: string, groupId: number, fileId: number): Promise<void>
   GetThumbURL(id: string, fileId: number): Promise<string>; GetFrameURLs(id: string, fileId: number): Promise<string[]>; DeleteFiles(request: Record<string, unknown>): Promise<DeleteResult>; ExportReport(id: string, format: string, scope: string): Promise<string>
   CheckUpdate(): Promise<UpdateInfo>; GetPendingUpdate(): Promise<UpdateInfo | null>; DownloadUpdate(proxy: boolean): Promise<void>; CancelUpdateDownload(): Promise<void>; ApplyUpdateAndRestart(): Promise<void>; OpenURL(url: string): Promise<void>; OpenPath(path: string): Promise<void>; RevealInFolder(path: string): Promise<void>; CopyToClipboard(text: string): Promise<void>
 }
@@ -51,7 +53,18 @@ function mockApi(): AppAPI {
     UpdateProject: async (id, patch) => { const p = await (async () => { const x = projects.find((y) => y.id === id); if (!x) throw new Error("项目不存在"); return x })(); Object.assign(p, patch); return structuredClone(p) }, DeleteProject: async (id) => { const i = projects.findIndex((p) => p.id === id); if (i >= 0) projects.splice(i, 1) },
     ListRecentDirs: async () => ["/tmp", "/Users/demo/Pictures"], SelectDirectory: async () => unsupported("目录选择"), CheckPaths: async (paths) => paths.map((path) => ({ path, exists: !path.includes("missing"), isDir: true, error: path.includes("missing") ? "路径不存在" : "" })),
     GetSettings: async () => ({ defaultThreshold: 0.95, defaultIncludeVideos: true, defaultIncludeTexts: false, defaultTextThreshold: 0.92, defaultTextWorkers: 2, defaultFrameCount: 8, defaultVideoCompareMode: "simple", defaultWorkers: 1, defaultVideoWorkers: 1, defaultVerifySampledHash: false, defaultDeleteMode: "recycle", allowPermanentDelete: false, ffmpegPath: "", ffprobePath: "", ffmpegAvailable: true, ffprobeAvailable: true }), SaveSettings: async () => undefined, StartScan: async () => unsupported("扫描"), CancelScan: async () => unsupported("扫描取消"), GetScanStatus: async (id) => ({ projectId: id, running: false, canceled: false, percent: 0, filesSeen: 0, errors: 0 }), ListScanErrors: async () => [],
-    ListGroups: async (_id, filter: Record<string, unknown> = {}) => mockGroups.filter((g) => !filter.status || filter.status === "all" || g.status === filter.status).map((g) => ({ groupId: g.groupId, groupType: g.groupType, confidence: g.confidence, recommendedFileId: g.recommendedFileId, status: g.status, memberCount: g.items.length, cleanupCount: g.items.filter((x) => x.action === "cleanup_candidate").length, reclaimableBytes: g.reclaimableBytes, coverThumbUrl: "", typeLabel: g.typeLabel, mediaKind: g.items[0]?.mediaType || "image" })),
+    ListGroups: async (_id, filter: Record<string, unknown> = {}) => {
+      // Mirrors the server contract: filtering and paging happen before the page
+      // is built, and total is the whole match set.
+      const status = String(filter.status ?? "pending")
+      const search = String(filter.search ?? "").toLowerCase()
+      const kind = String(filter.groupType ?? "")
+      const matched = mockGroups.filter((g) => (status === "all" || g.status === status) && (!kind || g.groupType === kind) && (!search || g.items.some((x) => x.path.toLowerCase().includes(search))))
+      const limit = Math.min(Number(filter.limit ?? 100) || 100, 500)
+      const offset = Math.max(Number(filter.offset ?? 0) || 0, 0)
+      const items = matched.slice(offset, offset + limit).map((g) => ({ groupId: g.groupId, groupType: g.groupType, confidence: g.confidence, recommendedFileId: g.recommendedFileId, status: g.status, memberCount: g.items.length, cleanupCount: g.items.filter((x) => x.action === "cleanup_candidate").length, reclaimableBytes: g.reclaimableBytes, typeLabel: g.typeLabel, mediaKind: g.items[0]?.mediaType || "image" }))
+      return { items, total: matched.length, limit, offset, hasMore: offset + items.length < matched.length }
+    },
     GetGroup: async (_id, groupId) => { const g = mockGroups.find((x) => x.groupId === groupId); if (!g) throw new Error("组不存在"); return structuredClone(g) },
     SetGroupStatus: async (_id, groupId, status) => { const g = mockGroups.find((x) => x.groupId === groupId); if (g) g.status = status },
     SetRecommended: async (_id, groupId, fileId) => { const g = mockGroups.find((x) => x.groupId === groupId); if (!g) return; g.recommendedFileId = fileId; for (const item of g.items) item.isRecommended = item.fileId === fileId },

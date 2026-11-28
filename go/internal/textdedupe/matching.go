@@ -11,6 +11,10 @@ import (
 	"media-dedupe/internal/novelname"
 )
 
+// Cap on per-file relation lines, so a 500-edition group does not write 500
+// reasons into every member's row.
+const maxEvidencePerMember = 8
+
 type relation struct {
 	kind                        model.GroupType
 	score                       float64
@@ -118,12 +122,20 @@ func GroupsProgress(ctx context.Context, facts []Fact, threshold float64, progre
 		}
 		for _, i := range component {
 			var evidence []string
+			// Reasons are stored per file in the results database. One line per
+			// relation is enough to justify a decision; listing every relation of a
+			// large group would write megabytes of near-identical JSON.
+			omitted := 0
 			for _, j := range component {
 				if i == j {
 					continue
 				}
 				r, ok := links[pairKey(i, j)]
 				if !ok {
+					continue
+				}
+				if len(evidence) >= maxEvidencePerMember {
+					omitted++
 					continue
 				}
 				description := "仅书名关联，正文未证实重复"
@@ -143,9 +155,16 @@ func GroupsProgress(ctx context.Context, facts []Fact, threshold float64, progre
 				evidence = append(evidence, fmt.Sprintf("与「%s」：%s", reps[j].Path, description))
 				if len(reps[i].Names) > 0 && len(reps[j].Names) > 0 {
 					for _, difference := range novelname.Differences(reps[i].Names[0], reps[j].Names[0]) {
+						if len(evidence) >= maxEvidencePerMember {
+							omitted++
+							break
+						}
 						evidence = append(evidence, fmt.Sprintf("与「%s」：%s", reps[j].Path, difference))
 					}
 				}
+			}
+			if omitted > 0 {
+				evidence = append(evidence, fmt.Sprintf("组内另有 %d 条与其它成员的关系未逐条列出，需要时请打开这些文件核对", omitted))
 			}
 			for k, f := range members[i] {
 				action := model.ActionReview

@@ -6,12 +6,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +19,7 @@ import (
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"media-dedupe/internal/cache"
 	"media-dedupe/internal/discovery"
+	"media-dedupe/internal/fsutil"
 	"media-dedupe/internal/hashfile"
 	"media-dedupe/internal/mediastore"
 	"media-dedupe/internal/model"
@@ -123,10 +124,27 @@ type GroupListDTO struct {
 	MemberCount       int     `json:"memberCount"`
 	CleanupCount      int     `json:"cleanupCount"`
 	ReclaimableBytes  int64   `json:"reclaimableBytes"`
-	CoverThumbURL     string  `json:"coverThumbUrl"`
 	TypeLabel         string  `json:"typeLabel"`
 	MediaKind         string  `json:"mediaKind"` // image | video | text | mixed
 }
+
+// GroupPageDTO is one page of the results table plus the size of the whole
+// match set, so the UI can say "showing 100 of 4213" instead of pretending the
+// page is everything that matched.
+type GroupPageDTO struct {
+	Items   []GroupListDTO `json:"items"`
+	Total   int            `json:"total"`
+	Limit   int            `json:"limit"`
+	Offset  int            `json:"offset"`
+	HasMore bool           `json:"hasMore"`
+}
+
+// Group page size: small enough that the first paint is instant on a big
+// project, large enough that scrolling is not a request per row.
+const (
+	defaultGroupPageSize = 100
+	maxGroupPageSize     = 500
+)
 
 type ItemDTO struct {
 	FileID          int64    `json:"fileId"`
@@ -185,11 +203,25 @@ type DeleteRequestDTO struct {
 	FileIDs   []int64  `json:"fileIds"`
 }
 
+// DeleteFailureDTO is one file that could not be deleted. FileID and GroupID let
+// the UI retry exactly that subset instead of replaying a request whose other
+// files are already gone.
+type DeleteFailureDTO struct {
+	Path    string `json:"path"`
+	Message string `json:"message"`
+	FileID  int64  `json:"fileId"`
+	GroupID int64  `json:"groupId"`
+}
+
 type DeleteResultDTO struct {
-	Succeeded       []string         `json:"succeeded"`
-	Failed          []ops.FailedItem `json:"failed"`
-	Mode            string           `json:"mode"`
-	MarkedProcessed []int64          `json:"markedProcessed"`
+	Succeeded       []string           `json:"succeeded"`
+	Failed          []DeleteFailureDTO `json:"failed"`
+	Mode            string             `json:"mode"`
+	MarkedProcessed []int64            `json:"markedProcessed"`
+	// MetadataErrors lists results-database updates that did not apply. The files
+	// are already removed at that point, so the only recovery is a rescan; it
+	// must be reported instead of being swallowed.
+	MetadataErrors []string `json:"metadataErrors,omitempty"`
 }
 
 type FinishedPayload struct {
@@ -206,8 +238,11 @@ type GroupFilter struct {
 	Status    string `json:"status"`
 	GroupType string `json:"groupType"`
 	Search    string `json:"search"`
-	Limit     int    `json:"limit"`
-	Offset    int    `json:"offset"`
+	// Sort is resolved against a fixed list of orderings in the cache layer;
+	// anything else falls back to confidence.
+	Sort   string `json:"sort"`
+	Limit  int    `json:"limit"`
+	Offset int    `json:"offset"`
 }
 
 func NewApp() *App {
@@ -599,14 +634,19 @@ func (a *App) runScan(ctx context.Context, p project.Project, st *scanState, ver
 	}
 
 	summary := project.ComputeSummary(result.Groups)
-	summary.FilesSeen = result.Meta.FilesSeen
 	if c, cerr := cache.Open(a.store.CachePath(p.ID)); cerr == nil {
-		if groups, lerr := c.LoadReportGroups(); lerr == nil {
-			summary = project.ComputeSummary(groups)
-			summary.FilesSeen = result.Meta.FilesSeen
+		if totals, terr := c.LoadGroupTotals(); terr == nil {
+			summary = project.LastSummary{
+				Groups:           totals.Groups,
+				ExactGroups:      totals.ExactGroups,
+				SimilarGroups:    totals.SimilarGroups,
+				PendingGroups:    totals.PendingGroups,
+				ReclaimableBytes: totals.ReclaimableBytes,
+			}
 		}
 		_ = c.Close()
 	}
+	summary.FilesSeen = result.Meta.FilesSeen
 	_ = a.store.SaveLastScan(p.ID, summary)
 
 	a.emitEvent("scan:finished", FinishedPayload{
@@ -621,6 +661,14 @@ func (a *App) runScan(ctx context.Context, p project.Project, st *scanState, ver
 func (a *App) emitEvent(name string, payload any) {
 	if a.emit != nil {
 		a.emit(name, payload)
+	}
+}
+
+// logWarning records a degraded path that did not fail the operation. It exists
+// so a swallowed error still leaves a trace in the app log instead of vanishing.
+func (a *App) logWarning(message string) {
+	if a.ctx != nil {
+		wailsruntime.LogWarning(a.ctx, message)
 	}
 }
 
@@ -673,20 +721,26 @@ func (a *App) ListScanErrors(projectID string) ([]ScanErrorDTO, error) {
 // refreshLastSummary recomputes the project's stored summary from current
 // group states, keeping the results header and sidebar badge up to date
 // after groups are ignored / processed / their files deleted.
-func (a *App) refreshLastSummary(projectID string) {
+func (a *App) refreshLastSummary(projectID string) error {
 	if a.store == nil {
-		return
+		return errors.New("app not ready")
 	}
 	c, err := a.openProjectCache(projectID)
 	if err != nil {
-		return
+		return err
 	}
-	groups, err := c.LoadReportGroups()
+	totals, err := c.LoadGroupTotals()
 	_ = c.Close()
 	if err != nil {
-		return
+		return err
 	}
-	_ = a.store.UpdateLastSummary(projectID, project.ComputeSummary(groups))
+	return a.store.UpdateLastSummary(projectID, project.LastSummary{
+		Groups:           totals.Groups,
+		ExactGroups:      totals.ExactGroups,
+		SimilarGroups:    totals.SimilarGroups,
+		PendingGroups:    totals.PendingGroups,
+		ReclaimableBytes: totals.ReclaimableBytes,
+	})
 }
 
 func (a *App) openProjectCache(projectID string) (*cache.Cache, error) {
@@ -749,115 +803,93 @@ func (a *App) resolveImageThumb(projectID string, fileID int64, srcPath, thumbPa
 	return ""
 }
 
-func (a *App) ListGroups(projectID string, filter GroupFilter) ([]GroupListDTO, error) {
+// mediaKindLabel turns the per-group media counts into the label the results
+// table shows. Counts come from the SQL aggregate, so the list does not have to
+// classify member paths.
+func mediaKindLabel(images, videos, texts int) string {
+	switch {
+	case images > 0 && videos == 0 && texts == 0:
+		return "image"
+	case videos > 0 && images == 0 && texts == 0:
+		return "video"
+	case texts > 0 && images == 0 && videos == 0:
+		return "text"
+	default:
+		return "mixed"
+	}
+}
+
+func (a *App) ListGroups(projectID string, filter GroupFilter) (GroupPageDTO, error) {
 	c, err := a.openProjectCache(projectID)
 	if err != nil {
-		return nil, err
+		return GroupPageDTO{}, err
 	}
 	defer c.Close()
-	groups, err := c.LoadReportGroups()
+	// The client picks the page, but not the ceiling: "0" used to mean "give me
+	// everything", which is what made 500+ group projects unloadable.
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = defaultGroupPageSize
+	}
+	if limit > maxGroupPageSize {
+		limit = maxGroupPageSize
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	q := cache.GroupQuery{
+		Status:    filter.Status,
+		GroupType: filter.GroupType,
+		Search:    filter.Search,
+		Sort:      filter.Sort,
+		Limit:     limit,
+		Offset:    offset,
+	}
+	rows, err := c.LoadGroupSummaries(q)
 	if err != nil {
-		return nil, err
+		return GroupPageDTO{}, err
 	}
-	_ = a.media.AllowRoot(a.store.ThumbDir(projectID))
-	_ = a.media.AllowRoot(a.store.FrameDir(projectID))
-
-	if filter.Status == "" {
-		filter.Status = string(model.GroupPending)
+	total, err := c.CountGroupSummaries(q)
+	if err != nil {
+		return GroupPageDTO{}, err
 	}
-	out := make([]GroupListDTO, 0, len(groups))
-	for _, g := range groups {
-		status := string(g.Status)
-		if status == "" {
-			status = string(model.GroupPending)
-		}
-		if filter.Status != "all" && status != filter.Status {
-			continue
-		}
-		if filter.GroupType != "" && string(g.GroupType) != filter.GroupType {
-			continue
-		}
-		if filter.Search != "" {
-			hit := false
-			for _, it := range g.Items {
-				if strings.Contains(strings.ToLower(it.Path), strings.ToLower(filter.Search)) {
-					hit = true
-					break
-				}
-			}
-			if !hit {
-				continue
-			}
-		}
-		var reclaim int64
-		cleanupCount := 0
-		var cover string
-		var hasImage, hasVideo, hasText bool
-		for _, it := range g.Items {
-			if it.IsCleanup() {
-				reclaim += it.SizeBytes
-				cleanupCount++
-			}
-			if mt, ok := discovery.Classify(it.Path); ok {
-				switch mt {
-				case model.MediaImage:
-					hasImage = true
-				case model.MediaVideo:
-					hasVideo = true
-				case model.MediaText:
-					hasText = true
-				}
-			}
-			if cover == "" && hasImage {
-				if mt, ok := discovery.Classify(it.Path); ok && mt == model.MediaImage {
-					cover = a.resolveImageThumb(projectID, it.FileID, it.Path, it.ThumbPath)
-				}
-			}
-		}
-		// Pure video/txt groups use icon placeholders; mixed groups keep image covers when present.
-		if !hasImage && (hasVideo || hasText) {
-			cover = ""
-		}
-		mediaKind := "mixed"
-		switch {
-		case hasImage && !hasVideo && !hasText:
-			mediaKind = "image"
-		case hasVideo && !hasImage && !hasText:
-			mediaKind = "video"
-		case hasText && !hasImage && !hasVideo:
-			mediaKind = "text"
-		}
+	out := make([]GroupListDTO, 0, len(rows))
+	for _, row := range rows {
 		out = append(out, GroupListDTO{
-			GroupID:           g.GroupID,
-			GroupType:         string(g.GroupType),
-			Confidence:        g.Confidence,
-			RecommendedFileID: g.RecommendedFileID,
-			Status:            status,
-			MemberCount:       len(g.Items),
-			CleanupCount:      cleanupCount,
-			ReclaimableBytes:  reclaim,
-			CoverThumbURL:     cover,
-			TypeLabel:         groupTypeLabel(string(g.GroupType)),
-			MediaKind:         mediaKind,
+			GroupID:           row.GroupID,
+			GroupType:         row.GroupType,
+			Confidence:        row.Confidence,
+			RecommendedFileID: row.RecommendedFileID,
+			Status:            row.Status,
+			MemberCount:       row.MemberCount,
+			CleanupCount:      row.CleanupCount,
+			ReclaimableBytes:  row.ReclaimableBytes,
+			TypeLabel:         groupTypeLabel(row.GroupType),
+			MediaKind:         mediaKindLabel(row.Images, row.Videos, row.Texts),
 		})
 	}
-	// Default result order is highest confidence first; ties keep group order.
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Confidence != out[j].Confidence {
-			return out[i].Confidence > out[j].Confidence
+	return GroupPageDTO{
+		Items:   out,
+		Total:   total,
+		Limit:   limit,
+		Offset:  offset,
+		HasMore: offset+len(out) < total,
+	}, nil
+}
+
+// cleanupCandidates lists the members of one group that are safe to remove
+// without asking the user again: explicit cleanup candidates that are not the
+// recommended file. Review items stay untouched.
+func cleanupCandidates(g *model.ReportGroup) []model.ReportItem {
+	out := make([]model.ReportItem, 0, len(g.Items))
+	for _, it := range g.Items {
+		if !it.IsCleanup() || it.FileID == g.RecommendedFileID {
+			continue
 		}
-		return out[i].GroupID < out[j].GroupID
-	})
-	if filter.Offset > 0 {
-		if filter.Offset >= len(out) {
-			return []GroupListDTO{}, nil
-		}
-		out = out[filter.Offset:]
+		out = append(out, it)
 	}
-	if filter.Limit > 0 && filter.Limit < len(out) {
-		out = out[:filter.Limit]
-	}
-	return out, nil
+	return out
 }
 
 // expandCandidatePaths resolves group IDs to their explicit cleanup candidates so
@@ -882,10 +914,7 @@ func (a *App) expandCandidatePaths(projectID string, groupIDs []int64) ([]string
 		if !want[g.GroupID] {
 			continue
 		}
-		for _, it := range g.Items {
-			if !it.IsCleanup() || it.FileID == g.RecommendedFileID {
-				continue
-			}
+		for _, it := range cleanupCandidates(&g) {
 			paths = append(paths, it.Path)
 			fileIDs = append(fileIDs, it.FileID)
 		}
@@ -899,18 +928,11 @@ func (a *App) GetGroup(projectID string, groupID int64) (GroupDetailDTO, error) 
 		return GroupDetailDTO{}, err
 	}
 	defer c.Close()
-	groups, err := c.LoadReportGroups()
+	g, found, err := c.LoadGroup(groupID)
 	if err != nil {
 		return GroupDetailDTO{}, err
 	}
-	var g *model.ReportGroup
-	for i := range groups {
-		if groups[i].GroupID == groupID {
-			g = &groups[i]
-			break
-		}
-	}
-	if g == nil {
+	if !found {
 		return GroupDetailDTO{}, errors.New("组不存在")
 	}
 	_ = a.media.AllowRoot(a.store.ThumbDir(projectID))
@@ -999,7 +1021,12 @@ func (a *App) SetGroupStatus(projectID string, groupID int64, status string) err
 	if err := c.SetGroupStatus(groupID, st); err != nil {
 		return err
 	}
-	a.refreshLastSummary(projectID)
+	// The status itself is stored; a stale header is a degraded display, not a
+	// failed action. Log it instead of turning it into an error the caller would
+	// read as "nothing was saved".
+	if err := a.refreshLastSummary(projectID); err != nil {
+		a.logWarning("刷新项目汇总失败: " + err.Error())
+	}
 	return nil
 }
 
@@ -1012,7 +1039,9 @@ func (a *App) SetRecommended(projectID string, groupID int64, fileID int64) erro
 	if err := c.UpdateRecommended(groupID, fileID); err != nil {
 		return err
 	}
-	a.refreshLastSummary(projectID)
+	if err := a.refreshLastSummary(projectID); err != nil {
+		a.logWarning("刷新项目汇总失败: " + err.Error())
+	}
 	return nil
 }
 
@@ -1065,115 +1094,51 @@ func (a *App) DeleteFiles(req DeleteRequestDTO) (DeleteResultDTO, error) {
 	if mode != "recycle" && mode != "permanent" {
 		return DeleteResultDTO{}, errors.New("invalid delete mode")
 	}
-	paths := req.Paths
-	// Bulk delete from the results list only needs group IDs: expand to each
-	// group's explicit cleanup candidates, leaving review items untouched.
-	if len(paths) == 0 && len(req.GroupIDs) > 0 {
-		expanded, fileIDs, err := a.expandCandidatePaths(req.ProjectID, req.GroupIDs)
-		if err != nil {
-			return DeleteResultDTO{}, err
-		}
-		paths = expanded
-		req.FileIDs = fileIDs
+	// The server decides what may be deleted. Targets are resolved from the
+	// results database by group and file id, then compared against the snapshot
+	// the scan recorded; a path sent by the caller only names a member, it never
+	// authorizes a filesystem operation.
+	targets, rejected, err := a.resolveDeleteTargets(req)
+	if err != nil {
+		return DeleteResultDTO{}, err
 	}
-	if len(paths) == 0 {
-		return DeleteResultDTO{}, errors.New("没有选中任何文件")
+	if len(targets) == 0 && len(rejected) > 0 {
+		// Nothing survived the pre-checks. Report why instead of returning an
+		// error: these are per-file outcomes the UI already knows how to show.
+		return DeleteResultDTO{Failed: rejected, Mode: mode}, nil
 	}
-	req.Paths = paths
-	if len(req.GroupIDs) > 0 {
-		if err := a.validateGroupDeletes(req); err != nil {
-			return DeleteResultDTO{}, err
-		}
+	paths := make([]string, 0, len(targets))
+	for _, target := range targets {
+		paths = append(paths, target.path)
 	}
 
-	res := ops.DeleteFiles(ops.Request{Mode: mode, Paths: req.Paths, GroupIDs: req.GroupIDs})
+	res := ops.DeleteFiles(ops.Request{Mode: mode, Paths: paths, GroupIDs: req.GroupIDs})
 	out := DeleteResultDTO{
 		Succeeded: res.Succeeded,
-		Failed:    res.Failed,
+		Failed:    make([]DeleteFailureDTO, 0, len(res.Failed)+len(rejected)),
 		Mode:      res.Mode,
 	}
-
-	if req.ProjectID != "" {
-		if c, err := a.openProjectCache(req.ProjectID); err == nil {
-			okSet := map[string]bool{}
-			for _, p := range res.Succeeded {
-				okSet[p] = true
-			}
-			failMsg := map[string]string{}
-			for _, f := range res.Failed {
-				failMsg[f.Path] = f.Message
-			}
-			groups, _ := c.LoadReportGroups()
-			// Only groups named in the request can change; avoid rescanning the
-			// whole project and replaying path matching per deleted file.
-			want := map[int64]bool{}
-			for _, id := range req.GroupIDs {
-				want[id] = true
-			}
-			for i := range groups {
-				g := &groups[i]
-				if len(want) > 0 && !want[g.GroupID] {
-					continue
-				}
-				recs := make([]cache.DeleteOpItem, 0, len(g.Items))
-				deleted := 0
-				for _, it := range g.Items {
-					if okSet[it.Path] {
-						recs = append(recs, cache.DeleteOpItem{FileID: it.FileID, Path: it.Path, OK: true})
-						deleted++
-						continue
-					}
-					if msg, failed := failMsg[it.Path]; failed {
-						recs = append(recs, cache.DeleteOpItem{FileID: it.FileID, Path: it.Path, Message: msg})
-					}
-				}
-				if len(recs) > 0 {
-					_ = c.RecordDeleteOps(mode, g.GroupID, recs)
-				}
-				if deleted == 0 {
-					continue
-				}
-				// Keepers that were never touched stay alive; only probe leftovers
-				// that might already have been missing before this delete.
-				alive := 0
-				for _, it := range g.Items {
-					if okSet[it.Path] {
-						continue
-					}
-					if _, err := os.Stat(it.Path); err == nil {
-						alive++
-					}
-				}
-				if alive >= 1 && alive < len(g.Items) && (!g.GroupType.IsTextAnalysis() || alive == 1) {
-					if err := c.SetGroupStatus(g.GroupID, model.GroupProcessed); err == nil {
-						out.MarkedProcessed = append(out.MarkedProcessed, g.GroupID)
-					}
-				}
-				if g.GroupType.IsTextAnalysis() {
-					// Removing one equivalence-class representative invalidates
-					// its cleanup dependants even if the group reference survived.
-					var removed []string
-					for _, it := range g.Items {
-						if okSet[it.Path] {
-							removed = append(removed, it.Path)
-						}
-					}
-					if _, err := c.DeleteFilesByPaths(removed); err != nil {
-						_ = c.Close()
-						return out, fmt.Errorf("文件已删除，但更新 TXT 结果失败，请重新扫描：%w", err)
-					}
-					if err := c.PruneReportGroups(); err != nil {
-						_ = c.Close()
-						return out, fmt.Errorf("文件已删除，但修复 TXT 结果失败，请重新扫描：%w", err)
-					}
-				}
-			}
-			_ = c.Close()
+	out.Failed = append(out.Failed, rejected...)
+	// Carry the identity back with every failure so the UI can retry exactly the
+	// files that are still on disk.
+	byPath := make(map[string]deleteTarget, len(targets))
+	for _, target := range targets {
+		byPath[target.path] = target
+	}
+	for _, failure := range res.Failed {
+		entry := DeleteFailureDTO{Path: failure.Path, Message: failure.Message}
+		if target, ok := byPath[failure.Path]; ok {
+			entry.FileID = target.fileID
+			entry.GroupID = target.groupID
 		}
+		out.Failed = append(out.Failed, entry)
 	}
 
 	if req.ProjectID != "" {
-		a.refreshLastSummary(req.ProjectID)
+		a.applyDeleteBookkeeping(req, res, mode, &out)
+		if err := a.refreshLastSummary(req.ProjectID); err != nil {
+			out.MetadataErrors = append(out.MetadataErrors, "刷新项目汇总失败："+err.Error())
+		}
 	}
 
 	a.emitEvent("files:deleted", map[string]any{
@@ -1183,35 +1148,301 @@ func (a *App) DeleteFiles(req DeleteRequestDTO) (DeleteResultDTO, error) {
 	return out, nil
 }
 
-func (a *App) validateGroupDeletes(req DeleteRequestDTO) error {
+// applyDeleteBookkeeping records what happened to each file and re-derives the
+// status of every group the request touched. A group becomes "processed" only
+// when nothing it still wanted to delete is left: judging by "some file still
+// exists" would let a failed candidate disappear from the pending list together
+// with its group.
+func (a *App) applyDeleteBookkeeping(req DeleteRequestDTO, res ops.Result, mode string, out *DeleteResultDTO) {
+	succeeded := make(map[string]bool, len(res.Succeeded))
+	for _, path := range res.Succeeded {
+		succeeded[path] = true
+	}
+	failMsg := make(map[string]string, len(res.Failed))
+	for _, failure := range res.Failed {
+		failMsg[failure.Path] = failure.Message
+	}
 	c, err := a.openProjectCache(req.ProjectID)
 	if err != nil {
-		return err
+		out.MetadataErrors = append(out.MetadataErrors, "打开结果缓存失败："+err.Error())
+		return
 	}
 	defer c.Close()
-	groups, err := c.LoadReportGroups()
-	if err != nil {
-		return err
-	}
-	del := map[string]bool{}
-	for _, p := range req.Paths {
-		del[p] = true
-	}
-	want := map[int64]bool{}
+	// Deletes write status changes and the operation log; fold them back now
+	// rather than on some later read-only request.
+	defer func() { _ = c.Checkpoint() }()
+	// Only groups named in the request can change; reading just those avoids a
+	// full report rebuild per delete and keeps the path matching local.
+	groups := make([]model.ReportGroup, 0, len(req.GroupIDs))
+	seenGroup := make(map[int64]bool, len(req.GroupIDs))
 	for _, id := range req.GroupIDs {
-		want[id] = true
-	}
-	for _, g := range groups {
-		if !want[g.GroupID] {
+		if seenGroup[id] {
 			continue
 		}
-		alive := 0
+		seenGroup[id] = true
+		group, found, err := c.LoadGroup(id)
+		if err != nil {
+			out.MetadataErrors = append(out.MetadataErrors, fmt.Sprintf("读取组 #%d 失败：%v", id, err))
+			continue
+		}
+		if found {
+			groups = append(groups, group)
+		}
+	}
+	for i := range groups {
+		g := &groups[i]
+		recs := make([]cache.DeleteOpItem, 0, len(g.Items))
+		deleted := 0
+		for _, it := range g.Items {
+			if succeeded[it.Path] {
+				recs = append(recs, cache.DeleteOpItem{FileID: it.FileID, Path: it.Path, OK: true})
+				deleted++
+				continue
+			}
+			if msg, failed := failMsg[it.Path]; failed {
+				recs = append(recs, cache.DeleteOpItem{FileID: it.FileID, Path: it.Path, Message: msg})
+			}
+		}
+		if len(recs) > 0 {
+			if err := c.RecordDeleteOps(mode, g.GroupID, recs); err != nil {
+				out.MetadataErrors = append(out.MetadataErrors, fmt.Sprintf("组 #%d 的删除记录写入失败：%v", g.GroupID, err))
+			}
+		}
+		if deleted == 0 {
+			continue
+		}
+		// Keepers that were never touched stay alive; only probe leftovers that
+		// might already have been missing before this delete.
+		alive, remaining := 0, 0
+		for _, it := range g.Items {
+			if succeeded[it.Path] {
+				continue
+			}
+			if _, err := os.Stat(it.Path); err != nil {
+				continue
+			}
+			alive++
+			if it.IsCleanup() {
+				remaining++
+			}
+		}
+		if alive >= 1 && remaining == 0 && (!g.GroupType.IsTextAnalysis() || alive == 1) {
+			if err := c.SetGroupStatus(g.GroupID, model.GroupProcessed); err != nil {
+				out.MetadataErrors = append(out.MetadataErrors, fmt.Sprintf("组 #%d 的状态更新失败：%v", g.GroupID, err))
+			} else {
+				out.MarkedProcessed = append(out.MarkedProcessed, g.GroupID)
+			}
+		}
+	}
+	if len(res.Succeeded) == 0 {
+		return
+	}
+	// Drop the rows of the files that are gone, in every group they belonged to,
+	// and repair the results. Without this the list keeps advertising candidates
+	// that were already removed, and a group that lost members keeps a member
+	// count nobody can act on.
+	if _, err := c.DeleteFilesByPaths(res.Succeeded); err != nil {
+		out.MetadataErrors = append(out.MetadataErrors, "文件已删除，但更新结果失败，请重新扫描："+err.Error())
+		return
+	}
+	if err := c.PruneReportGroups(); err != nil {
+		out.MetadataErrors = append(out.MetadataErrors, "文件已删除，但修复结果失败，请重新扫描："+err.Error())
+	}
+}
+
+// deleteTarget is one member the server resolved for deletion. Its path comes
+// from the results database rather than from the caller, so a request can only
+// address files that the scan actually put into the named group.
+type deleteTarget struct {
+	groupID int64
+	fileID  int64
+	path    string
+}
+
+// resolveDeleteTargets turns a delete request into concrete files. It is the only
+// place that decides which paths may be touched, and it refuses anything the
+// results no longer describe:
+//
+//   - unknown groups (a stale or invented group id must not act as a wildcard),
+//   - members that do not belong to the named groups,
+//   - deleting a group's recommended file,
+//   - removing every file of a group,
+//   - files whose size / timestamp / identity differ from the scan snapshot
+//     (they may have been replaced by an unrelated file since the scan).
+//
+// The last two categories differ in blast radius. A group-level problem is an
+// error: the request was wrong. A single file whose snapshot no longer matches is
+// returned as `rejected` so the other files still get deleted and the UI shows
+// exactly which one was skipped and why — aborting a 200-group batch because one
+// file was touched since the scan is not safer, only slower.
+func (a *App) resolveDeleteTargets(req DeleteRequestDTO) ([]deleteTarget, []DeleteFailureDTO, error) {
+	if req.ProjectID == "" {
+		return nil, nil, errors.New("删除请求缺少项目标识，请刷新结果页后重试")
+	}
+	if len(req.GroupIDs) == 0 {
+		return nil, nil, errors.New("删除请求缺少组信息，请刷新结果页后重试")
+	}
+	c, err := a.openProjectCache(req.ProjectID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer c.Close()
+	// Only the groups the request names are read: a delete of a handful of groups
+	// must not load the whole project's results.
+	wanted := make([]*model.ReportGroup, 0, len(req.GroupIDs))
+	var rejected []DeleteFailureDTO
+	seenGroup := make(map[int64]bool, len(req.GroupIDs))
+	for _, id := range req.GroupIDs {
+		if seenGroup[id] {
+			continue
+		}
+		seenGroup[id] = true
+		g, found, err := c.LoadGroup(id)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !found {
+			// A retry can outlive the group: a rescan or another delete may have
+			// pruned it. Report it as a failure for that group and let the rest of
+			// the batch run, instead of blocking every other file behind it.
+			rejected = append(rejected, DeleteFailureDTO{
+				Path:    fmt.Sprintf("组 #%d", id),
+				Message: "该组已不在当前结果中（可能已被删除或已重新扫描），无需再删除",
+				GroupID: id,
+			})
+			continue
+		}
+		wanted = append(wanted, &g)
+	}
+	if len(wanted) == 0 {
+		return nil, rejected, nil
+	}
+	targets, unresolved, err := selectDeleteTargets(wanted, req)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, id := range unresolved {
+		// Nothing is deleted for an id we cannot place in a named group; report it
+		// instead of failing the batch. FileID stays 0 so it is not offered for
+		// retry — retrying the same id would fail the same way.
+		rejected = append(rejected, DeleteFailureDTO{
+			Path:    fmt.Sprintf("文件 #%d", id),
+			Message: "该文件不属于所选组，或其所在组已不在当前结果中，请刷新后重新确认",
+		})
+	}
+	if err := checkGroupInvariants(wanted, targets); err != nil {
+		return nil, nil, err
+	}
+	kept := targets[:0]
+	for _, target := range targets {
+		reject, err := checkDeleteSnapshot(c, target)
+		if err != nil {
+			return nil, nil, err
+		}
+		if reject != "" {
+			rejected = append(rejected, DeleteFailureDTO{
+				Path: target.path, Message: reject, FileID: target.fileID, GroupID: target.groupID,
+			})
+			continue
+		}
+		kept = append(kept, target)
+	}
+	return kept, rejected, nil
+}
+
+// selectDeleteTargets picks the members a request addresses. Explicit file ids
+// win over paths; paths are only matched against members of the named groups, so
+// a path that was never stored cannot become deletable. With neither, the request
+// means the groups' explicit cleanup candidates (bulk delete from the list).
+func selectDeleteTargets(groups []*model.ReportGroup, req DeleteRequestDTO) ([]deleteTarget, []int64, error) {
+	switch {
+	case len(req.FileIDs) > 0:
+		wanted := make(map[int64]bool, len(req.FileIDs))
+		for _, id := range req.FileIDs {
+			wanted[id] = true
+		}
+		used := make(map[int64]bool, len(req.FileIDs))
+		var targets []deleteTarget
+		for _, g := range groups {
+			for _, it := range g.Items {
+				if !wanted[it.FileID] || used[it.FileID] {
+					continue
+				}
+				used[it.FileID] = true
+				targets = append(targets, deleteTarget{groupID: g.GroupID, fileID: it.FileID, path: it.Path})
+			}
+		}
+		var unresolved []int64
+		for _, id := range req.FileIDs {
+			if !used[id] {
+				unresolved = append(unresolved, id)
+			}
+		}
+		return targets, unresolved, nil
+	case len(req.Paths) > 0:
+		byPath := make(map[string]deleteTarget, len(req.Paths))
+		for _, g := range groups {
+			for _, it := range g.Items {
+				if it.Path == "" {
+					continue
+				}
+				if _, exists := byPath[it.Path]; exists {
+					continue
+				}
+				byPath[it.Path] = deleteTarget{groupID: g.GroupID, fileID: it.FileID, path: it.Path}
+			}
+		}
+		targets := make([]deleteTarget, 0, len(req.Paths))
+		seen := make(map[string]bool, len(req.Paths))
+		for _, path := range req.Paths {
+			target, ok := byPath[path]
+			if !ok {
+				return nil, nil, fmt.Errorf("路径不在所选组中，请刷新结果页后重试：%s", path)
+			}
+			if seen[path] {
+				continue
+			}
+			seen[path] = true
+			targets = append(targets, target)
+		}
+		return targets, nil, nil
+	default:
+		var targets []deleteTarget
+		for _, g := range groups {
+			for _, it := range cleanupCandidates(g) {
+				targets = append(targets, deleteTarget{groupID: g.GroupID, fileID: it.FileID, path: it.Path})
+			}
+		}
+		if len(targets) == 0 {
+			return nil, nil, errors.New("没有选中任何文件（所选组没有明确的清理候选）")
+		}
+		return targets, nil, nil
+	}
+}
+
+// checkGroupInvariants enforces the rules that keep a group actionable after the
+// delete: the recommendation survives, a comparison reference still exists, and
+// removing one representative of an equivalence class does not silently strand
+// the copies that were justified by it.
+func checkGroupInvariants(groups []*model.ReportGroup, targets []deleteTarget) error {
+	chosen := make(map[int64]map[int64]bool, len(groups))
+	for _, target := range targets {
+		if chosen[target.groupID] == nil {
+			chosen[target.groupID] = map[int64]bool{}
+		}
+		chosen[target.groupID][target.fileID] = true
+	}
+	for _, g := range groups {
+		selected := chosen[g.GroupID]
+		if selected[g.RecommendedFileID] {
+			return fmt.Errorf("组 #%d 的推荐保留文件不能直接删除，请先把其他文件设为推荐", g.GroupID)
+		}
 		if g.GroupType.IsTextAnalysis() {
 			// A mixed group can contain several different books/editions. A
 			// remaining unrelated reference cannot stand in for a missing copy
 			// that justified cleaning one of the group's equality classes.
 			for _, it := range g.Items {
-				if it.IsCleanup() || del[it.Path] {
+				if it.IsCleanup() || selected[it.FileID] {
 					continue
 				}
 				if _, err := os.Stat(it.Path); err != nil {
@@ -1219,11 +1450,13 @@ func (a *App) validateGroupDeletes(req DeleteRequestDTO) error {
 				}
 			}
 		}
+		alive := 0
 		for _, it := range g.Items {
-			if !del[it.Path] {
-				if _, err := os.Stat(it.Path); err == nil {
-					alive++
-				}
+			if selected[it.FileID] {
+				continue
+			}
+			if _, err := os.Stat(it.Path); err == nil {
+				alive++
 			}
 		}
 		if alive < 1 {
@@ -1231,6 +1464,40 @@ func (a *App) validateGroupDeletes(req DeleteRequestDTO) error {
 		}
 	}
 	return nil
+}
+
+// checkDeleteSnapshot compares the file on disk with what the scan recorded. The
+// first return value is a per-file reason to skip this one file; the error is
+// reserved for infrastructure problems (the database cannot be read), which do
+// abort the request.
+func checkDeleteSnapshot(c *cache.Cache, target deleteTarget) (string, error) {
+	snap, ok, err := c.LoadFileSnapshot(target.fileID)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return fmt.Sprintf("组 #%d 的文件不在扫描结果中，请重新扫描后再删除：%s", target.groupID, target.path), nil
+	}
+	size, mtimeNs, inode, device, err := fsutil.SafeStat(target.path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil
+		}
+		return fmt.Sprintf("无法读取文件状态，请检查权限后重试：%s（%v）", target.path, err), nil
+	}
+	if size != snap.SizeBytes || mtimeNs != snap.MTimeNs {
+		return fmt.Sprintf("文件在扫描后已被修改，请重新扫描后再保留或删除：%s", target.path), nil
+	}
+	// Identity is only compared when both sides know it: Windows has no stable
+	// equivalent here, and caches written before inode/device were recorded
+	// carry zeros.
+	if snap.Inode != 0 && inode != 0 && uint64(snap.Inode) != inode {
+		return fmt.Sprintf("该路径已指向另一个文件，请重新扫描后再删除：%s", target.path), nil
+	}
+	if snap.Device != 0 && device != 0 && uint64(snap.Device) != device {
+		return fmt.Sprintf("该路径已指向另一个文件，请重新扫描后再删除：%s", target.path), nil
+	}
+	return "", nil
 }
 
 func (a *App) ExportReport(projectID, format, scope string) (string, error) {

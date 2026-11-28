@@ -31,16 +31,18 @@ func VerifyGroups(ctx context.Context, groups []model.ReportGroup, facts []Fact,
 	total := 0
 	for _, g := range groups {
 		if g.GroupType.IsTextAnalysis() {
-			total += len(g.Items) * (len(g.Items) - 1) / 2
+			total += verifyPairCount(len(g.Items))
 		}
 	}
 	done := 0
 	var errs []FileError
+	cacheFailures := 0
 	for gi := range groups {
 		g := &groups[gi]
 		if !g.GroupType.IsTextAnalysis() {
 			continue
 		}
+		verified := 0
 		// Bound retained text independently of group size. Large entries are
 		// used only for the current pair; no whole-library text cache is built.
 		const textBudget = 64 << 20
@@ -77,8 +79,15 @@ func VerifyGroups(ctx context.Context, groups []model.ReportGroup, facts []Fact,
 			}
 			return text
 		}
+		// Every pair is a cache lookup plus two file reads. Hundreds of editions of
+		// one book would mean tens of thousands of them, so the group is verified up
+		// to a bound and every member says it was not fully covered.
+	pairLoop:
 		for i := range g.Items {
 			for j := i + 1; j < len(g.Items); j++ {
+				if verified >= maxVerifyPairsPerGroup {
+					break pairLoop
+				}
 				if ctx.Err() != nil {
 					return errs
 				}
@@ -91,11 +100,17 @@ func VerifyGroups(ctx context.Context, groups []model.ReportGroup, facts []Fact,
 					}
 					var result model.TextVerification
 					var cached bool
-					var err error
-					if cache != nil {
+					// A broken verification cache costs speed, not correctness: the pair
+					// is simply compared again. Record the first failure and keep going
+					// without the cache instead of dropping the rest of the scan's
+					// evidence on the floor.
+					if cache != nil && cacheFailures == 0 {
+						var err error
 						result, cached, err = cache.LoadTextVerification(fa.Digest, fb.Digest)
 						if err != nil {
-							return append(errs, FileError{a.Path, "text_cache", err})
+							cacheFailures++
+							errs = append(errs, FileError{a.Path, "text_cache", err})
+							cached = false
 						}
 					}
 					if !cached {
@@ -105,23 +120,43 @@ func VerifyGroups(ctx context.Context, groups []model.ReportGroup, facts []Fact,
 						}
 						if left != nil && right != nil {
 							result = verifyTextPair(left, right)
-							if cache != nil {
+							if cache != nil && cacheFailures == 0 {
 								if err := cache.SaveTextVerification(fa.Digest, fb.Digest, result); err != nil {
-									return append(errs, FileError{a.Path, "text_cache", err})
+									cacheFailures++
+									errs = append(errs, FileError{a.Path, "text_cache", err})
 								}
 							}
 						}
 					}
 					appendVerification(a, b, result)
 				}
+				verified++
 				done++
 				if progress != nil {
 					progress(done, total, g.Items[j].Path)
 				}
 			}
 		}
+		if verified < len(g.Items)*(len(g.Items)-1)/2 {
+			note := fmt.Sprintf("组内共 %d 个成员，仅复核了前 %d 对全文，其余组合未复核，判断前请抽查", len(g.Items), verified)
+			for i := range g.Items {
+				g.Items[i].Reasons = append(g.Items[i].Reasons, note)
+			}
+		}
 	}
 	return errs
+}
+
+// A group of editions can be arbitrarily large; past this many pairs the scan
+// reports "not fully verified" instead of spending minutes per group.
+const maxVerifyPairsPerGroup = 400
+
+func verifyPairCount(members int) int {
+	pairs := members * (members - 1) / 2
+	if pairs > maxVerifyPairsPerGroup {
+		return maxVerifyPairsPerGroup
+	}
+	return pairs
 }
 
 func verifyTextPair(left, right *verificationText) model.TextVerification {

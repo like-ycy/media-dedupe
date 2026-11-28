@@ -131,7 +131,13 @@ func Scan(opts Options) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open cache: %w", err)
 	}
-	defer c.Close()
+	// A scan is the write-heavy pass, so it is also the one place that folds the
+	// WAL back into the main file. Request handlers only open/close briefly and
+	// must not take that lock while this is running.
+	defer func() {
+		_ = c.Checkpoint()
+		_ = c.Close()
+	}()
 
 	scanRunID, err := c.StartScanRun(opts.Paths, map[string]any{
 		"similarity":      opts.Threshold,
@@ -347,14 +353,7 @@ func Scan(opts Options) (*Result, error) {
 		}
 		recordTextErrors := func(errs []textdedupe.FileError) {
 			for _, textErr := range errs {
-				switch textErr.Stage {
-				case "text_cache":
-					hooks.fatal(textErr.Path, textErr.Stage, textErr.Err)
-				case "text_decode":
-					recordErr(textErr.Path, textErr.Stage, model.ErrorText, textErr.Err.Error())
-				default:
-					hooks.file(textErr.Path, textErr.Stage, textErr.Err)
-				}
+				recordTextFailure(hooks, recordErr, textErr)
 			}
 		}
 		textFiles := make([]model.DiscoveredFile, 0)

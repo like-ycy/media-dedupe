@@ -36,6 +36,11 @@ func TestTextFingerprintMigrationAndRoundTrip(t *testing.T) {
 	if _, err := c.DB().Exec(`ALTER TABLE text_facts DROP COLUMN text_hash`); err != nil {
 		t.Fatal(err)
 	}
+	// A cache written by an older binary carries no schema version; that is what
+	// tells the next open to run the migration.
+	if _, err := c.DB().Exec(`PRAGMA user_version = 0`); err != nil {
+		t.Fatal(err)
+	}
 	c.Close()
 	c, err = Open(p)
 	if err != nil {

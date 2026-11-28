@@ -98,6 +98,11 @@ func TestTextCacheVersionFiveMigratesLegacySchema(t *testing.T) {
 	if _, err := c.DB().Exec("ALTER TABLE text_facts DROP COLUMN decode_error"); err != nil {
 		t.Fatal(err)
 	}
+	// Simulate a cache from a binary that predates schema versioning: no version
+	// recorded, so the next open migrates it.
+	if _, err := c.DB().Exec("PRAGMA user_version = 0"); err != nil {
+		t.Fatal(err)
+	}
 	c.Close()
 	if r, err := Scan(opts); err != nil || len(r.Errors) > 0 {
 		t.Fatalf("migration result=%+v err=%v", r, err)

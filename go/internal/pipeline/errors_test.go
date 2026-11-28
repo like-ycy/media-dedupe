@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"media-dedupe/internal/model"
+	"media-dedupe/internal/textdedupe"
 )
 
 func TestIsFatalIOError(t *testing.T) {
@@ -233,5 +234,49 @@ func TestScanHooksKeepsConfirmedDuplicateOnLaterFailure(t *testing.T) {
 	}
 	if len(kinds) != 2 || kinds[1] != model.ErrorSkipped {
 		t.Fatalf("kinds=%v want [aux skipped]", kinds)
+	}
+}
+
+// A failing verification cache used to cancel the whole scan. It only stores
+// evidence, so the scan continues with a warning; a dying disk still aborts.
+func TestRecordTextFailureClassifiesCacheErrors(t *testing.T) {
+	type recorded struct{ path, stage, kind, message string }
+	run := func(err error) ([]recorded, error) {
+		var got []recorded
+		failures := newFailureTracker()
+		hooks := &scanHooks{
+			record:   func(path, stage, kind, message string) { got = append(got, recorded{path, stage, kind, message}) },
+			failures: failures,
+			cancel:   func() {},
+		}
+		recordTextFailure(hooks, hooks.record, textdedupe.FileError{Path: "/a.txt", Stage: "text_cache", Err: err})
+		return got, failures.fatalErr()
+	}
+
+	locked, fatal := run(errors.New("database is locked"))
+	if fatal != nil {
+		t.Fatalf("locked cache aborted the scan: %v", fatal)
+	}
+	if len(locked) != 1 || locked[0].kind != model.ErrorAux {
+		t.Fatalf("cache failure should be a warning, got %+v", locked)
+	}
+
+	disk, fatal := run(syscall.EIO)
+	if fatal == nil {
+		t.Fatal("disk failure did not abort the scan")
+	}
+	if len(disk) != 1 || disk[0].kind != model.ErrorFatal {
+		t.Fatalf("disk failure should be fatal, got %+v", disk)
+	}
+
+	// Decode problems stay a per-file skip, as before.
+	var decode []recorded
+	hooks := &scanHooks{
+		record:   func(path, stage, kind, message string) { decode = append(decode, recorded{path, stage, kind, message}) },
+		failures: newFailureTracker(),
+	}
+	recordTextFailure(hooks, hooks.record, textdedupe.FileError{Path: "/b.txt", Stage: "text_decode", Err: errors.New("bad gbk")})
+	if len(decode) != 1 || decode[0].kind != model.ErrorText {
+		t.Fatalf("decode failure: %+v", decode)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"media-dedupe/internal/model"
+	"media-dedupe/internal/textdedupe"
 	"media-dedupe/internal/video"
 )
 
@@ -143,6 +144,25 @@ func (h *scanHooks) fatal(path, stage string, err error) {
 	h.failures.setFatal(fmt.Errorf("%s: %s: %w", stage, path, err))
 	if h.cancel != nil {
 		h.cancel()
+	}
+}
+
+// recordTextFailure classifies one TXT-stage error. A verification-cache failure
+// only costs evidence — the pair is re-verified in memory — so it must not cancel
+// a scan that may already be an hour in. Storage-level errors still abort, and a
+// decode failure stays a per-file skip.
+func recordTextFailure(hooks *scanHooks, record func(path, stage, kind, message string), e textdedupe.FileError) {
+	switch e.Stage {
+	case "text_cache":
+		if isFatalIOError(e.Err) {
+			hooks.fatal(e.Path, e.Stage, e.Err)
+			return
+		}
+		record(e.Path, e.Stage, model.ErrorAux, e.Err.Error())
+	case "text_decode":
+		record(e.Path, e.Stage, model.ErrorText, e.Err.Error())
+	default:
+		hooks.file(e.Path, e.Stage, e.Err)
 	}
 }
 
